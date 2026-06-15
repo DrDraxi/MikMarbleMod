@@ -4,7 +4,9 @@ set "ROOT=%~dp0"
 
 echo === Initializing RE-UE4SS submodule ===
 echo (First run is large and slow - it pulls the UE4SS framework and its deps.)
-git -C "%ROOT%." submodule update --init --recursive
+echo (-c url.insteadOf rewrites UE4SS's SSH submodule URLs to HTTPS so this works
+echo  even without a configured GitHub SSH key.)
+git -C "%ROOT%." -c url.https://github.com/.insteadOf=git@github.com: submodule update --init --recursive
 if errorlevel 1 (
     echo === Submodule init FAILED. Is git installed and is this a git clone? ===
     exit /b 1

@@ -126,6 +126,11 @@ build.bat clean            :: wipe the CMake build dir first, then rebuild
 - `setup.bat` runs `git submodule update --init --recursive` (the first run is
   large — UE4SS pulls its own dependencies) and appends an `add_subdirectory(...)`
   line to `RE-UE4SS/cppmods/CMakeLists.txt` pointing at `src/MikMarbleMod`.
+  UE4SS configures its own nested submodules with `git@github.com:` SSH URLs, so
+  `setup.bat` passes `-c url.https://github.com/.insteadOf=git@github.com:` to make
+  the recursive init work over HTTPS even without a GitHub SSH key. (If you cloned
+  with `git clone --recurse-submodules` and don't have SSH set up, re-run that
+  fetch with the same `-c url...insteadOf` flag, or just run `setup.bat`.)
 - Build output lands in `RE-UE4SS/build/Game__Shipping__Win64/bin/`
   (`MikMarbleMod.dll`, `UE4SS.dll`, `dwmapi.dll`).
 - `--deploy` copies the built `MikMarbleMod.dll` to
