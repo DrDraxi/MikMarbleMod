@@ -1,0 +1,6 @@
+# Autonomous bot test runner deps.
+# pydirectinput is REQUIRED (UE ignores pyautogui's virtual-key input).
+pyautogui
+pydirectinput
+opencv-python
+pillow

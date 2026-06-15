@@ -1,0 +1,20 @@
+# RE-UE4SS build output (the submodule source itself is tracked as a gitlink)
+RE-UE4SS/build/
+
+# Compiler intermediates
+*.pdb
+*.ilk
+*.obj
+
+# Bot test debug captures
+tests/bot_debug/
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
