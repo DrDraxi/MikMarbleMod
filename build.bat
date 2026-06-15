@@ -42,6 +42,15 @@ if errorlevel 1 (
     exit /b 1
 )
 
+:: The UE4SS proxy loader (dwmapi.dll) is a separate target and is NOT pulled in
+:: by the MikMarbleMod target. Build it too so --deploy has dwmapi.dll to copy.
+echo === Building proxy (dwmapi.dll) ===
+cmake --build build --target proxy
+if errorlevel 1 (
+    echo === BUILD FAILED: proxy ===
+    exit /b 1
+)
+
 if %DO_DEPLOY%==0 (
     echo === BUILD DONE ^(output in RE-UE4SS\build\Game__Shipping__Win64\bin^) ===
     exit /b 0
