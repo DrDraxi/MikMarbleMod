@@ -18,3 +18,12 @@ __pycache__/
 .idea/
 Thumbs.db
 .DS_Store
+
+# ue-modding toolkit workspace (machine-specific, generated)
+profile.toml
+.mcp.json
+/out/
+.claude/
+
+# build/setup run logs
+*.log
