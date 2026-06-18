@@ -27,3 +27,10 @@ profile.toml
 
 # build/setup run logs
 *.log
+
+# release artifacts (attached to GitHub releases, not committed)
+*.zip
+
+# stray crash dumps
+bash.exe.stackdump
+**/bash.exe.stackdump

@@ -1,0 +1,36 @@
+MikMarbleMod 3.17 — install
+===========================
+
+This bundle is a complete, ready-to-run UE4SS install with MikMarbleMod.
+
+1. Find your game's Win64 folder:
+   <Steam>\steamapps\common\Marbles on Stream\MarblesOnStream\Binaries\Win64\
+
+2. Copy the CONTENTS of this zip into that Win64 folder:
+     dwmapi.dll   -> lands next to MarblesOnStream-Win64-Shipping.exe
+     ue4ss\       -> merges into the existing ue4ss\ folder (if you already have one)
+
+3. Launch the game. UE4SS loads the mod from
+     ue4ss\Mods\MikMarbleMod\dlls\main.dll
+
+What it does
+------------
+At the end of each race / royale it POSTs the final standings as JSON:
+
+  POST {path}/results
+  {"type":"race"|"royale","players":[{"name":"Alice","finished":true}, ...]}
+
+Players are ordered finishers-first, then DNFs, so the LAST entry is the loser.
+
+Endpoint
+--------
+On first launch the mod auto-creates:
+     ue4ss\Mods\MikMarbleMod\config.txt
+
+with these defaults (which match the bundled dummy server, server/server.py):
+
+  host=127.0.0.1
+  port=5000
+  path=/mod        # POSTs to /mod/ready and /mod/results
+
+To use your own backend, edit that file after the first launch and restart.

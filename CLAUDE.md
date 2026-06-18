@@ -3,7 +3,7 @@
 A [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) C++ mod for **Marbles on Stream**
 (Steam AppID `1170970`). It reads the final standings at the end of each race or
 royale and **POSTs the results as JSON** to an HTTP endpoint, so an external
-service can react to who won, who lost, eliminations, and damage.
+service can react to **who won and who lost**.
 
 A small Flask **dummy results server** and an **autonomous bot test runner** are
 bundled so the whole loop (play a race → mod reads standings → POST → server
@@ -13,26 +13,39 @@ prints them) can be exercised without writing any backend.
 
 ## How it works
 
-The mod is a single translation unit, `src/MikMarbleMod/dllmain.cpp` (~2k lines).
-At a high level:
+The mod is a single translation unit, `src/MikMarbleMod/dllmain.cpp` (~700 lines).
+It is **event-driven** — it hooks the game's own gameplay UFunctions rather than
+scraping the result UI. At a high level:
 
 1. **Load config** (`config.txt` next to the DLL) — endpoint `host` / `port` /
-   `path`. If the file is missing it is auto-created with defaults
-   (**see the config warning below**).
-2. On `start_mod` it registers UE4SS hooks. Once Unreal is initialized it fires a
-   one-shot `POST {path}/ready` so the server knows the mod is live.
-3. While a match runs it inspects the game's result UI widgets and the
-   `GameState` to recover each player's **placement, finish time, DNF/eliminated
-   status, elimination order, eliminations and damage**. Much of the file is
-   *offset discovery* — it figures out where fields like `FinishTime`,
-   `bEliminated`, `Position` and `EliminationOrder` live in the result structs by
-   cross-referencing what the visible UI shows (DNF vs a placement number), so it
-   keeps working across game updates. A "sticky DNF cache" remembers players who
-   scrolled off-screen.
-4. When the standings are final it builds a JSON payload and **POSTs it on a
-   background thread** via WinHTTP to `POST {path}/results`. Players are ordered
-   by placement: finishers first (1st…Nth), then DNFs ordered highest-placed →
-   lowest, so for royales the **last entry is the first eliminated (the loser)**.
+   `path`. If the file is missing it is auto-created with defaults (`path=/mod`).
+2. Once Unreal is initialized it fires a one-shot `POST {path}/ready` so the
+   server knows the mod is live.
+3. When a match's HUD appears it registers post-hooks (via `UFunction::RegisterPostHook`)
+   on three native `AMarbleRaceHUDY2` events (the royale HUD derives from it, so
+   one set of hooks covers both modes), resolving them by walking the class's
+   function chain:
+   - `OnMarbleFinishedRace(Marble)` → records the **finish order** (race mode).
+   - `OnMarbleEliminated(Marble)` → records the **elimination order** (first out
+     = the loser).
+   - `OnMatchEnded()` → the single authoritative "results are final" trigger.
+
+   Each `Marble` exposes its player name (`_Username`) and `PlayerState` by
+   reflection, so standings are rebuilt from authoritative, virtualization-proof
+   events — no guessed byte offsets, no dependence on the UI having rendered, and
+   no "latch on a half-drawn frame" race.
+4. On `OnMatchEnded` it builds the standings and **POSTs them on a background
+   thread** via WinHTTP to `POST {path}/results`. Ordering is finishers-first then
+   DNFs, so the **last entry is the first eliminated (the loser)**:
+   - **race** — finishers in finish order, then DNFs (eliminated/timed-out) in
+     reverse-elimination order.
+   - **royale** — the winner first (the standings leader `GameState.Top10[0]` if a
+     marble survived, otherwise the last marble eliminated), then everyone else in
+     reverse-elimination order.
+
+Per-match accumulators reset whenever the `GameState` instance changes (a new
+match). Reading is on the game thread; the HTTP POST is detached so a slow server
+can't stall the game.
 
 ### Results payload
 
@@ -40,14 +53,22 @@ At a high level:
 {
   "type": "race",            // or "royale"
   "players": [
-    { "name": "Alice", "finished": true,  "eliminations": 3, "damage": 120 },
-    { "name": "Bob",   "finished": false, "eliminations": 0, "damage": 0   }
+    { "name": "Alice", "finished": true  },
+    { "name": "Bob",   "finished": false }   // last entry = the loser
   ]
 }
 ```
 
-The mod also draws a small ImGui debug panel inside UE4SS for inspecting what it
-read.
+> **Note:** earlier versions also reported `eliminations` and `damage` per player.
+> A reflection capture of the game showed those live only in an opaque result data
+> object / the UI (not in any gameplay event), so they could not be made
+> authoritative and were dropped. The payload is intentionally just `name` +
+> `finished`. For royales that **time out** with marbles still alive, only the
+> winner and the eliminated players are reported (the alive middle-rank players
+> have no event-derived ranking).
+
+The mod also draws a small ImGui debug panel inside UE4SS showing the endpoint,
+whether the hooks are registered, and the last standings sent.
 
 ---
 
@@ -65,7 +86,7 @@ MikMarbleMod/
 │   └── CMakeLists.txt            # mod build target
 ├── dist/                         # PREBUILT, ready-to-run bundle (see "Run without building")
 │   ├── dwmapi.dll                # UE4SS proxy DLL
-│   └── ue4ss/…                   # UE4SS runtime + Mods/MikMarbleMod/dlls/main.dll + config.txt
+│   └── ue4ss/…                   # UE4SS runtime + Mods/MikMarbleMod/dlls/main.dll
 ├── server/
 │   ├── server.py                 # Flask dummy results server (port 5000)
 │   └── requirements.txt
@@ -140,7 +161,7 @@ build.bat clean            :: wipe the CMake build dir first, then rebuild
 
 ---
 
-## config.txt (read this — it bites)
+## config.txt
 
 The mod looks for `config.txt` next to its DLL
 (`ue4ss\Mods\MikMarbleMod\config.txt`):
@@ -153,12 +174,9 @@ path=/mod
 
 The mod POSTs to `{path}/ready` and `{path}/results`, so with `path=/mod` it hits
 `/mod/ready` and `/mod/results` — which is exactly what the bundled `server.py`
-serves.
-
-⚠️ **If `config.txt` does not exist, the mod auto-creates it with `path=/winners`,
-which does NOT match the dummy server** (you'd get 404s). The `dist/` bundle ships
-a correct `config.txt` with `path=/mod`. If you build/deploy fresh, make sure the
-deployed `config.txt` says `path=/mod` (or point it at your real backend).
+serves. If `config.txt` does not exist it is auto-created with these defaults
+(`path=/mod`), so a fresh deploy works against the dummy server out of the box.
+Point `path` at your real backend to use it for real.
 
 ---
 
@@ -226,7 +244,8 @@ sensitive — if matches start missing, recapture them on your display.
 
 ## Versioning / packaging
 
-`ModVersion` is set in `dllmain.cpp` (currently `3.16`). To cut a release, build,
+`ModVersion` is set in `dllmain.cpp` (currently `3.17`). To cut a release, build,
 then refresh `dist/ue4ss/Mods/MikMarbleMod/dlls/main.dll` with the new
-`MikMarbleMod.dll` and zip the `dist/` contents. Keep `config.txt` set to `/mod`
-in the shipped bundle so it works against the dummy server out of the box.
+`MikMarbleMod.dll` and zip the `dist/` contents. The bundle does **not** ship a
+`config.txt` — the mod auto-creates it (with `path=/mod`) next to the DLL on first
+launch, so a fresh install works against the dummy server out of the box.
