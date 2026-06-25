@@ -1,9 +1,9 @@
 # MikMarbleMod
 
 A [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) C++ mod for **Marbles on Stream**
-(Steam AppID `1170970`). It reads the final standings at the end of each race or
-royale and **POSTs the results as JSON** to an HTTP endpoint, so an external
-service can react to **who won and who lost**.
+(Steam AppID `1170970`). It reads the final standings at the end of each race,
+royale, or target race (Bullseye) and **POSTs the results as JSON** to an HTTP
+endpoint, so an external service can react to **who won and who lost**.
 
 A small Flask **dummy results server** and an **autonomous bot test runner** are
 bundled so the whole loop (play a race → mod reads standings → POST → server
@@ -42,6 +42,16 @@ scraping the result UI. At a high level:
    - **royale** — the winner first (the standings leader `GameState.Top10[0]` if a
      marble survived, otherwise the last marble eliminated), then everyone else in
      reverse-elimination order.
+   - **target race (Bullseye)** — this mode's per-marble finish/elimination events
+     never fire, so standings are **not** event-derived. The mode is detected by the
+     presence of `BullseyeGameState` (so race/royale handling is untouched). On
+     `OnMatchEnded` every marble is ranked by its **geometric distance to the target
+     centre** (`GameState.BullseyeFinish.Bullseye`), reading world positions via the
+     engine's `K2_GetActorLocation` / `K2_GetComponentLocation` (called through
+     `UObject::ProcessEvent`). Closest first (winner), farthest last (loser); all
+     marbles report `finished: true`. Distance is the actual scoring metric —
+     `Top10`, `FinishedMarbles` (settle order), and `FindMarbleAtPosition` (finish
+     time) were each verified *not* to encode the target placement.
 
 Per-match accumulators reset whenever the `GameState` instance changes (a new
 match). Reading is on the game thread; the HTTP POST is detached so a slow server
@@ -51,7 +61,7 @@ can't stall the game.
 
 ```jsonc
 {
-  "type": "race",            // or "royale"
+  "type": "race",            // "race", "royale", or "bullseye"
   "players": [
     { "name": "Alice", "finished": true  },
     { "name": "Bob",   "finished": false }   // last entry = the loser

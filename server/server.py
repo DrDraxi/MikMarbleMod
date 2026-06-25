@@ -49,6 +49,9 @@ def receive_results():
         loser = None
         if game_type == 'royale':
             loser = dnfs[-1]['name'] if dnfs else None  # first eliminated = last in list
+        elif game_type == 'bullseye':
+            # Score-ranked: everyone finished, best first, lowest score is last.
+            loser = finished[-1]['name'] if finished else None
 
         finished_count = len(finished)
         dnf_count = len(dnfs)

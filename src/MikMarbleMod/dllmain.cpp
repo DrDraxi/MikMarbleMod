@@ -153,6 +153,7 @@ __declspec(noinline) static UClass* SafeGetClassPrivate(UObject* obj) noexcept
 
 struct FStringRaw { wchar_t* Data; int32_t Num; int32_t Max; };  // Num includes the null terminator
 struct TArrayRaw  { void* Data; int32_t Num; int32_t Max; };
+struct FVectorD   { double X, Y, Z; };  // UE5 FVector (double precision, size 0x18)
 
 // Reads + validates an FString at `src`. Accepts 1..127 chars; allows non-ASCII
 // (Unicode stream names) but rejects control chars and obviously-bad memory.
@@ -224,6 +225,28 @@ static UObject* ReadFirstArrayElem(UObject* obj, const TCHAR* arrayName)
     UObject* o = nullptr;
     if (!SafeReadBytes(a.Data, &o, sizeof(o))) return nullptr;   // first element
     return o;
+}
+
+// Read up to maxN elements of a UObject*-array property (e.g. GameState.Top10).
+// Skips null slots; returns them in array order.
+static std::vector<UObject*> ReadObjectArray(UObject* obj, const TCHAR* arrayName, int maxN = 256)
+{
+    std::vector<UObject*> out;
+    if (!obj) return out;
+    void* arrField = nullptr;
+    try { arrField = obj->GetValuePtrByPropertyNameInChain<TArrayRaw>(arrayName); } catch (...) { return out; }
+    if (!arrField) return out;
+    TArrayRaw a{};
+    if (!SafeReadBytes(arrField, &a, sizeof(a))) return out;
+    if (a.Num <= 0 || a.Num > 100000 || !a.Data) return out;
+    int n = a.Num < maxN ? a.Num : maxN;
+    for (int i = 0; i < n; ++i)
+    {
+        UObject* o = nullptr;
+        if (!SafeReadBytes(static_cast<const char*>(a.Data) + i * sizeof(UObject*), &o, sizeof(o))) break;
+        if (o) out.push_back(o);
+    }
+    return out;
 }
 
 // Count of players in the match (GameState.PlayerArray), for a sanity log.
@@ -429,6 +452,16 @@ class MikMarbleMod : public RC::CppUserModBase
         return UObjectGlobals::FindFirstOf(STR("MarbleRoyaleGameState")) != nullptr;
     }
 
+    // Bullseye / "target" race: marbles settle near a target and are ranked by
+    // proximity (score), not finish position. It derives from MarbleRaceGameState
+    // but its scoring goes through ABullseyeFinish, NOT the OnMarbleFinishedRace /
+    // OnMarbleEliminated delegates — so the event accumulator stays empty and this
+    // mode needs its own standings read (see BuildBullseyeStandings).
+    static bool IsBullseye()
+    {
+        return UObjectGlobals::FindFirstOf(STR("BullseyeGameState")) != nullptr;
+    }
+
     // ── UFunction hooks ──────────────────────────────────────────────────────
     //
     // Hook the game's own events on AMarbleRaceHUDY2 (the royale HUD derives from
@@ -484,6 +517,42 @@ class MikMarbleMod : public RC::CppUserModBase
             if (n == name) return fn;
         }
         return nullptr;
+    }
+
+    // Call a `UObject* Fn(int32)` UFunction (e.g. GameMode.FindMarbleAtPosition)
+    // via ProcessEvent. The params buffer is [int32 arg][ptr return]; ProcessEvent
+    // writes the return pointer. SEH-guarded — a bad call must never crash.
+    __declspec(noinline) static UObject* CallIntToObj(UObject* obj, UFunction* fn, int32_t arg) noexcept
+    {
+        if (!obj || !fn) return nullptr;
+        struct Params { int32_t Arg; UObject* ReturnValue; } params{};
+        params.Arg = arg;
+        params.ReturnValue = nullptr;
+        __try { obj->ProcessEvent(fn, &params); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+        return params.ReturnValue;
+    }
+
+    // Call a no-arg `FVector Fn()` UFunction (Actor.K2_GetActorLocation /
+    // SceneComponent.K2_GetComponentLocation) — returns world location.
+    __declspec(noinline) static bool CallGetVector(UObject* obj, UFunction* fn, FVectorD& out) noexcept
+    {
+        if (!obj || !fn) return false;
+        struct Params { FVectorD ReturnValue; } params{};
+        __try { obj->ProcessEvent(fn, &params); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+        out = params.ReturnValue;
+        return true;
+    }
+
+    // Resolve + cache the world-location UFunction for an object's class, then call it.
+    static bool GetWorldLocation(UObject* obj, const wchar_t* funcName, FVectorD& out)
+    {
+        if (!obj) return false;
+        UClass* cls = SafeGetClassPrivate(obj);
+        if (!cls) return false;
+        UFunction* fn = FindFuncInChain(cls, funcName);
+        return CallGetVector(obj, fn, out);
     }
 
     void TryRegisterHooks()
@@ -571,6 +640,88 @@ class MikMarbleMod : public RC::CppUserModBase
             for (auto it = elimOrder.rbegin(); it != elimOrder.rend(); ++it)
                 push(*it, false);
         }
+        return out;
+    }
+
+    // ── Bullseye (target race) standings ─────────────────────────────────────
+    //
+    // Bullseye ranks marbles by how close they settle to the target centre, not by
+    // finish position or time. The per-marble events never fire, Top10 is a time/
+    // progress cache that doesn't even contain the winner, and the GameMode's
+    // FindMarbleAtPosition() ranks by finish TIME (verified against the results
+    // export) — none of which is the target score.
+    //
+    // The authoritative metric is geometric: distance from each settled marble to
+    // the ABullseyeFinish.Bullseye centre component. We read world locations via
+    // the engine's K2_GetActorLocation / K2_GetComponentLocation, then sort
+    // ascending — closest first (winner), farthest last (loser). All finishers are
+    // reported finished. If the centre or locations can't be read we fall back to
+    // the (time-ordered) placement lookup so we still send something.
+    std::vector<PlayerResult> BuildBullseyeStandings(UObject* gs)
+    {
+        std::vector<PlayerResult> out;
+
+        // The target centre: GameState.BullseyeFinish -> Bullseye (USceneComponent).
+        UObject* finishActor = ReadObjProp(gs, STR("BullseyeFinish"));
+        UObject* centreComp  = finishActor ? ReadObjProp(finishActor, STR("Bullseye")) : nullptr;
+        FVectorD centre{};
+        bool haveCentre = centreComp && GetWorldLocation(centreComp, L"K2_GetComponentLocation", centre);
+
+        // Build the full marble roster. FinishedMarbles only holds those that
+        // settled on the target — a marble that shot past without settling (the
+        // worst placement) is absent — so we also enumerate every marble via the
+        // GameMode placement lookup. Order here is irrelevant; we re-rank below.
+        std::vector<UObject*> roster;
+        std::set<UObject*> rosterSet;
+        auto addMarble = [&](UObject* m) { if (m && rosterSet.insert(m).second) roster.push_back(m); };
+
+        UObject* gm = UObjectGlobals::FindFirstOf(STR("MarbleRaceGameMode"));
+        UFunction* fnPos = nullptr;
+        if (gm) { if (UClass* c = SafeGetClassPrivate(gm)) fnPos = FindFuncInChain(c, L"FindMarbleAtPosition"); }
+        int expected = ReadPlayerArrayNum(gs);
+        int maxPos = (expected > 0 && expected < 1024) ? expected + 4 : 256;
+        if (gm && fnPos)
+            for (int pos = 1, misses = 0; pos <= maxPos && misses < 4; ++pos)
+            {
+                UObject* m = CallIntToObj(gm, fnPos, pos);
+                if (!m) { ++misses; continue; }
+                misses = 0;
+                addMarble(m);
+            }
+        if (finishActor)
+            for (UObject* m : ReadObjectArray(finishActor, STR("FinishedMarbles"))) addMarble(m);
+
+        // Rank every marble by distance² to the centre — closest first (winner),
+        // farthest last (loser, including any off-target marble).
+        struct Ranked { std::wstring name; double dist2; };
+        std::vector<Ranked> ranked;
+        if (haveCentre)
+            for (UObject* m : roster)
+            {
+                std::wstring name = ResolveUsername(m);
+                if (name.empty()) continue;
+                FVectorD loc{};
+                if (!GetWorldLocation(m, L"K2_GetActorLocation", loc)) continue;
+                double dx = loc.X - centre.X, dy = loc.Y - centre.Y, dz = loc.Z - centre.Z;
+                ranked.push_back({name, dx * dx + dy * dy + dz * dz});
+            }
+        std::stable_sort(ranked.begin(), ranked.end(),
+                         [](const Ranked& a, const Ranked& b) { return a.dist2 < b.dist2; });
+
+        std::set<std::wstring> seen;
+        for (const auto& r : ranked)
+            if (seen.insert(r.name).second) out.push_back({r.name, true});
+
+        // Fallback: distances unavailable — send the roster in placement order so
+        // we still report something rather than dropping the match.
+        if (out.empty())
+            for (UObject* m : roster) { std::wstring n = ResolveUsername(m); if (!n.empty() && seen.insert(n).second) out.push_back({n, true}); }
+
+        std::wstring first = out.empty() ? std::wstring(STR("(none)")) : out.front().name;
+        std::wstring last  = out.empty() ? std::wstring(STR("(none)")) : out.back().name;
+        Output::send<LogLevel::Default>(
+            STR("[MikMarble] bullseye: centre={} roster={} ranked={} | winner={} loser={}\n"),
+            haveCentre ? 1 : 0, (int)roster.size(), (int)ranked.size(), first, last);
         return out;
     }
 
@@ -667,9 +818,13 @@ class MikMarbleMod : public RC::CppUserModBase
         // The OnMatchEnded hook flips g_endPending; build + POST exactly once.
         if (gs && !m_sentThisMatch && mik::g_endPending.load())
         {
+            // Bullseye is read from the ranked leaderboard; race/royale are built
+            // from the event accumulator exactly as before (untouched path).
+            bool bullseye = IsBullseye();
             bool royale = IsRoyale();
-            std::string wireType = royale ? "royale" : "race";
-            auto players = BuildStandings(royale, gs);
+            const wchar_t* modeName = bullseye ? STR("bullseye") : (royale ? STR("royale") : STR("race"));
+            std::string wireType = bullseye ? "bullseye" : (royale ? "royale" : "race");
+            auto players = bullseye ? BuildBullseyeStandings(gs) : BuildStandings(royale, gs);
 
             if (players.empty())
             {
@@ -679,14 +834,14 @@ class MikMarbleMod : public RC::CppUserModBase
                 m_sentThisMatch = true;
                 mik::g_endPending.store(false);
                 Output::send<LogLevel::Warning>(STR("[MikMarble] match ended but no events captured ({}); not sending\n"),
-                                                royale ? STR("royale") : STR("race"));
+                                                modeName);
                 return;
             }
 
             int expected = ReadPlayerArrayNum(gs);
             int finishedCount = 0; for (const auto& p : players) if (p.finished) ++finishedCount;
             Output::send<LogLevel::Default>(STR("[MikMarble] {} ended: {} players ({} finished, expected ~{})\n"),
-                royale ? STR("royale") : STR("race"), players.size(), finishedCount, expected);
+                modeName, players.size(), finishedCount, expected);
             for (const auto& p : players)
                 Output::send<LogLevel::Default>(STR("[MikMarble]   {} {}\n"),
                     p.name, p.finished ? STR("[fin]") : STR("[DNF]"));
@@ -707,7 +862,7 @@ public:
     MikMarbleMod() : CppUserModBase()
     {
         ModName        = STR("MikMarbleMod");
-        ModVersion     = STR("3.17");
+        ModVersion     = STR("3.18");
         ModDescription = STR("Mik marbles race result tracker (C++, event-driven)");
         ModAuthors     = STR("Draxi");
 
@@ -719,7 +874,7 @@ public:
             std::string host, path; int port = 0;
             { std::lock_guard<std::mutex> lock(self->m_configMutex); host = self->m_config.host; port = self->m_config.port; path = self->m_config.path; }
 
-            ImGui::Text("MikMarbleMod v3.17 (C++, event-driven)");
+            ImGui::Text("MikMarbleMod v3.18 (C++, event-driven)");
             ImGui::Text("Endpoint: %s:%d%s", host.c_str(), port, path.c_str());
             ImGui::Text("Hooks: %s", self->m_hooksRegistered ? "registered" : "waiting for HUD...");
             ImGui::Separator();
@@ -764,7 +919,7 @@ public:
     {
         std::wstring wHost(m_config.host.begin(), m_config.host.end());
         std::wstring wPath(m_config.path.begin(), m_config.path.end());
-        Output::send<LogLevel::Default>(STR("[MikMarble] Mod initialized (C++ v3.17) -> {}:{}{}\n"), wHost, m_config.port, wPath);
+        Output::send<LogLevel::Default>(STR("[MikMarble] Mod initialized (C++ v3.18) -> {}:{}{}\n"), wHost, m_config.port, wPath);
         m_unrealReady.store(true);
     }
 
