@@ -24,6 +24,7 @@ profile.toml
 .mcp.json
 /out/
 .claude/
+/docs/learning/
 
 # build/setup run logs
 *.log

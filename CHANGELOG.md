@@ -2,6 +2,60 @@
 
 All notable changes to MikMarbleMod are documented here.
 
+## [3.19] - 2026-07-01
+
+Royale resurrection support + per-player elimination counts.
+
+### Fixed
+- **Resurrected royale winners are now crowned correctly.** A new post-hook on
+  `URoyaleGameRespawnComponent::BP_RespawnPlayer` erases a respawned player's
+  earlier elimination, so only their *final* death (or survival) determines
+  placement. Previously a player who died, respawned, and won stayed in the
+  eliminated set — the mod crowned the last-eliminated marble instead, and if
+  the resurrected winner had been the first out, they were reported in the
+  loser slot. (The hook registers lazily on the first royale, since the respawn
+  component only exists in that mode.)
+- **The royale loser is the first *final* elimination.** A player who was first
+  out but respawned no longer occupies the loser slot.
+
+### Added
+- **`eliminations` per player in the payload** — kills credited to each player,
+  read from the `FDamageInstigator` (killer `Username`/`DisplayName`) that the
+  game passes with every `OnMarbleEliminated` event. Event-derived, unlike the
+  pre-3.17 UI-scraped counts. 0 for environmental deaths; keyed
+  case-insensitively (instigator carries the Twitch login, marbles the display
+  name). `damage` remains dropped — it has no event-derived source.
+- Respawns are logged (`[MikMarble] respawn: <name> (elimination erased)`) and
+  the ImGui panel shows respawn-hook status and per-player elim counts.
+- Hook param offsets are resolved from the UFunction's own param reflection
+  (no packing assumptions), and the respawn hook binds by static path
+  (`/Script/MarblesOnStream.RoyaleGameRespawnComponent:BP_RespawnPlayer`) so it
+  registers at startup without needing the royale-only component instance.
+- Kill counts are joined from killer *display* names back to standings
+  *usernames* via a per-match name map (the `DamageInstigator` carries display
+  names; bot usernames differ by a digit suffix, humans only by case).
+- The bot test now reads ground-truth standings via the results panel's
+  copy-to-clipboard button (full TSV in placement order, saved to
+  `tests/bot_debug/verify_<ts>_results.tsv`) instead of scrolling screenshot
+  crops; the first eliminations of each match are logged raw for diagnosis.
+
+### Payload
+```jsonc
+{
+  "type": "royale",
+  "players": [
+    { "name": "Alice", "finished": true,  "eliminations": 2 },
+    { "name": "Bob",   "finished": false, "eliminations": 0 }  // last = the loser
+  ]
+}
+```
+
+## [3.18] - 2026-06-26
+
+Target race (Bullseye) result reading — marbles ranked by geometric distance to
+the target centre (`GameState.BullseyeFinish.Bullseye`), closest first. Race and
+royale handling untouched.
+
 ## [3.17] - 2026-06-18
 
 A ground-up rewrite of how the mod reads results — from scraping the result UI to

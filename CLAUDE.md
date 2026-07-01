@@ -26,9 +26,18 @@ scraping the result UI. At a high level:
    one set of hooks covers both modes), resolving them by walking the class's
    function chain:
    - `OnMarbleFinishedRace(Marble)` → records the **finish order** (race mode).
-   - `OnMarbleEliminated(Marble)` → records the **elimination order** (first out
-     = the loser).
+   - `OnMarbleEliminated(Marble, DamageInstigator, DamageEvent)` → records the
+     **elimination order** (first out = the loser). The `DamageInstigator` struct
+     carries the killer's `Username`/`DisplayName`, so **per-player elimination
+     (kill) counts** are also event-derived.
    - `OnMatchEnded()` → the single authoritative "results are final" trigger.
+
+   A fourth hook, `URoyaleGameRespawnComponent::BP_RespawnPlayer` (registered
+   lazily — the component only exists during a royale), handles **royale
+   resurrections**: the respawned player's earlier elimination is erased, so only
+   their *final* death (or survival) determines placement. A resurrected marble
+   that goes on to win is correctly crowned, and the loser slot isn't polluted by
+   someone who died first but came back.
 
    Each `Marble` exposes its player name (`_Username`) and `PlayerState` by
    reflection, so standings are rebuilt from authoritative, virtualization-proof
@@ -63,19 +72,20 @@ can't stall the game.
 {
   "type": "race",            // "race", "royale", or "bullseye"
   "players": [
-    { "name": "Alice", "finished": true  },
-    { "name": "Bob",   "finished": false }   // last entry = the loser
+    { "name": "Alice", "finished": true,  "eliminations": 2 },
+    { "name": "Bob",   "finished": false, "eliminations": 0 }  // last entry = the loser
   ]
 }
 ```
 
-> **Note:** earlier versions also reported `eliminations` and `damage` per player.
-> A reflection capture of the game showed those live only in an opaque result data
-> object / the UI (not in any gameplay event), so they could not be made
-> authoritative and were dropped. The payload is intentionally just `name` +
-> `finished`. For royales that **time out** with marbles still alive, only the
-> winner and the eliminated players are reported (the alive middle-rank players
-> have no event-derived ranking).
+> **Note:** `eliminations` is the number of kills credited to that player, counted
+> from the `DamageInstigator` on each `OnMarbleEliminated` event (0 for
+> environmental deaths and in bullseye). Kill counts are keyed case-insensitively
+> (the instigator carries the Twitch login, the marble its display name). A
+> `damage` field existed in the pre-3.17 UI-scraping era but has no event-derived
+> source, so it stays dropped. For royales that **time out** with marbles still
+> alive, only the winner and the eliminated players are reported (the alive
+> middle-rank players have no event-derived ranking).
 
 The mod also draws a small ImGui debug panel inside UE4SS showing the endpoint,
 whether the hooks are registered, and the last standings sent.
@@ -214,6 +224,14 @@ screenshots in `tests/screenshots/` (Start → mode select → map → bot count
 play → results), then the mod POSTs the standings to the running server. It's how
 you exercise the result-reading logic across maps and modes without hand-playing.
 
+On the results table it reads the ground-truth standings via the panel's
+**copy-to-clipboard button** (`results_copy.png`, fixed-coord fallback): the game
+puts a `Player/Points/Time` TSV on the clipboard in placement order (winner
+first, loser last — all rows, even a 100-player royale), which is printed and
+saved to `tests/bot_debug/verify_<ts>_results.tsv` for comparison against the
+mod's POST. If the clipboard read fails it falls back to the old screenshot
+crops (`verify_<ts>_top10/last.png`).
+
 **Two things that will waste your time if you skip them:**
 
 1. **Start the results server first.** If it's down, every POST fails with WinHTTP
@@ -254,7 +272,7 @@ sensitive — if matches start missing, recapture them on your display.
 
 ## Versioning / packaging
 
-`ModVersion` is set in `dllmain.cpp` (currently `3.17`). To cut a release, build,
+`ModVersion` is set in `dllmain.cpp` (currently `3.19`). To cut a release, build,
 then refresh `dist/ue4ss/Mods/MikMarbleMod/dlls/main.dll` with the new
 `MikMarbleMod.dll` and zip the `dist/` contents. The bundle does **not** ship a
 `config.txt` — the mod auto-creates it (with `path=/mod`) next to the DLL on first

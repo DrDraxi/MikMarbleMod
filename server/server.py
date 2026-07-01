@@ -60,7 +60,9 @@ def receive_results():
         print(f"Players ({len(players)} total, {finished_count} finished, {dnf_count} DNF):")
         for i, p in enumerate(players, 1):
             flag = "OK " if p['finished'] else "DNF"
-            print(f"  {i:>2}. [{flag}] {p['name']}")
+            elims = p.get('eliminations', 0)
+            elims_note = f"  (elims: {elims})" if elims else ""
+            print(f"  {i:>2}. [{flag}] {p['name']}{elims_note}")
         if winner:
             print(f"Winner: {winner}")
         if loser:

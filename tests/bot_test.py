@@ -120,6 +120,69 @@ def wait_for(image_name, timeout=600, confidence=DEFAULT_CONF, label=None):
     dbg_shot(f"WAIT_TIMEOUT_{label.replace(' ','_')}")
     return False
 
+def read_results_via_clipboard(ts):
+    """Read the final standings via the Results panel's copy-to-clipboard button.
+
+    The button (top-left of the Results panel, camera-stack icon) puts a TSV
+    table on the clipboard: a "Player\\tPoints\\tTime" header, then one row per
+    player in PLACEMENT ORDER — winner first, loser last. That covers all rows
+    of a 100-player royale without the scrollbar dance, and the names are exact
+    text (no OCR from crops). Returns the ordered player list, or None so the
+    caller can fall back to the screenshot method.
+    """
+    loc = find("results_copy.png", timeout=5, confidence=0.85)
+    xy = (loc.x, loc.y) if loc else (326, 151)   # fixed fallback (2560x1440)
+    # Pre-clear the clipboard so stale content can't be mistaken for results.
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-Command", "Set-Clipboard -Value ' '"],
+                       check=False, timeout=5)
+    except Exception:
+        pass
+    # Same cursor rules as the other results-screen buttons: big move (wakes a
+    # hidden cursor), then a tiny hover jiggle so the button registers, then click.
+    pyautogui.moveTo(1280, 700, duration=0.15)
+    time.sleep(0.1)
+    pyautogui.moveTo(xy[0], xy[1], duration=0.2)
+    time.sleep(0.1)
+    pyautogui.moveTo(xy[0] + 3, xy[1] + 2)
+    time.sleep(0.05)
+    pyautogui.moveTo(xy[0], xy[1])
+    time.sleep(0.08)
+    pyautogui.click()
+    time.sleep(0.8)
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
+                             capture_output=True, text=True, errors="replace", timeout=5).stdout or ""
+    except Exception as e:
+        print(f"[clip] read err: {e}", flush=True)
+        return None
+    rows = [r.split("\t") for r in out.replace("\r", "").split("\n") if r.strip()]
+    if len(rows) < 2 or rows[0][0] != "Player":
+        print(f"[clip] unexpected clipboard content ({len(rows)} rows) — falling back", flush=True)
+        return None
+    players = [r[0] for r in rows[1:]]
+    try:
+        (DEBUG_DIR / f"verify_{ts}_results.tsv").write_text(out, encoding="utf-8")
+    except Exception as e:
+        print(f"[clip] tsv save err: {e}", flush=True)
+    print(f"[clip] {len(players)} players copied: winner={players[0]} loser={players[-1]}", flush=True)
+    return players
+
+def dismiss_copy_dialog():
+    """The copy button opens a centered modal ("Data Copied To Clipboard
+    Successfully." + Ok) that swallows ALL further clicks — the Race Menu clicks
+    land on nothing until it's dismissed. Click its Ok button (screen-centered,
+    fixed coords like the rest of the script)."""
+    pyautogui.moveTo(1280, 870, duration=0.2)
+    time.sleep(0.1)
+    pyautogui.moveTo(1283, 872)   # tiny hover jiggle so the button registers
+    time.sleep(0.05)
+    pyautogui.moveTo(1280, 870)
+    time.sleep(0.08)
+    pyautogui.click()
+    time.sleep(0.5)
+    print("[clip] dismissed copy-confirmation dialog", flush=True)
+
 def run_one_race(map_image, bot_count=None, pause_results=False):
     print(f"\n=== Starting race on {map_image}" + (f" with {bot_count} bots" if bot_count else "") + " ===", flush=True)
     if not click_when(map_image, timeout=20, label=f"map ({map_image})"):
@@ -242,26 +305,35 @@ def run_one_race(map_image, bot_count=None, pause_results=False):
     try:
         full = pyautogui.screenshot()
         ts = int(time.time())
+        # Full results screen (for locating UI elements / new reference crops)
+        full.save(str(DEBUG_DIR / f"verify_{ts}_full.png"))
         # First-place row (50px tall) for quick winner check
         full.crop((550, 300, 850, 350)).save(str(DEBUG_DIR / f"verify_{ts}_first.png"))
-        # Top-10 block (500px tall = 10 rows of 50px each)
-        full.crop((550, 300, 850, 800)).save(str(DEBUG_DIR / f"verify_{ts}_top10.png"))
-        # Jump to bottom by DRAGGING the scrollbar thumb down its full travel.
-        # Mouse-wheel scrolling is unreliable on this list (doesn't reach the end of
-        # a 100-row royale), so grab the scrollbar at (1847,400) and drag to y=1400.
-        pyautogui.moveTo(1847, 400, duration=0.2)
-        time.sleep(0.1)
-        pyautogui.mouseDown(button='left')
-        time.sleep(0.1)
-        pyautogui.moveTo(1847, 1400, duration=0.8)
-        time.sleep(0.1)
-        pyautogui.mouseUp(button='left')
-        time.sleep(0.6)
-        full2 = pyautogui.screenshot()
-        # Capture a TALL bottom band (~9 rows) so the true last row is in-frame even
-        # if exact alignment varies — the royale loser is the bottom row.
-        full2.crop((550, 1000, 850, 1450)).save(str(DEBUG_DIR / f"verify_{ts}_last.png"))
-        print(f"[verify] saved first/top10/last crops ts={ts}", flush=True)
+        # Primary check: the copy-to-clipboard button gives the FULL standings as
+        # text in placement order (winner first, loser last) — exact names, all
+        # rows, no scrolling. Saved to verify_{ts}_results.tsv.
+        players = read_results_via_clipboard(ts)
+        dismiss_copy_dialog()   # the copy click opens a modal that blocks all other clicks
+        if players is None:
+            # Fallback (clipboard failed): screenshot crops of the table.
+            # Top-10 block (500px tall = 10 rows of 50px each)
+            full.crop((550, 300, 850, 800)).save(str(DEBUG_DIR / f"verify_{ts}_top10.png"))
+            # Jump to bottom by DRAGGING the scrollbar thumb down its full travel.
+            # Mouse-wheel scrolling is unreliable on this list (doesn't reach the end of
+            # a 100-row royale), so grab the scrollbar at (1847,400) and drag to y=1400.
+            pyautogui.moveTo(1847, 400, duration=0.2)
+            time.sleep(0.1)
+            pyautogui.mouseDown(button='left')
+            time.sleep(0.1)
+            pyautogui.moveTo(1847, 1400, duration=0.8)
+            time.sleep(0.1)
+            pyautogui.mouseUp(button='left')
+            time.sleep(0.6)
+            full2 = pyautogui.screenshot()
+            # Capture a TALL bottom band (~9 rows) so the true last row is in-frame even
+            # if exact alignment varies — the royale loser is the bottom row.
+            full2.crop((550, 1000, 850, 1450)).save(str(DEBUG_DIR / f"verify_{ts}_last.png"))
+            print(f"[verify] saved first/top10/last crops ts={ts}", flush=True)
     except Exception as e:
         print(f"[verify] err: {e}", flush=True)
     if pause_results:
