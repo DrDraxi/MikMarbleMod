@@ -19,11 +19,17 @@
 //       → elimination order (loser first); DamageInstigator carries the killer's
 //         Username/DisplayName, so per-player elimination counts are event-derived
 //   • OnMatchEnded()                → the one authoritative "results are final" trigger
-// plus URoyaleGameRespawnComponent::BP_RespawnPlayer(PendingRespawn) → a royale
-// resurrection: the respawned player's earlier elimination is erased so only the
-// FINAL death (or survival) determines their placement — a resurrected marble
-// that goes on to win is correctly crowned, and the loser slot isn't polluted by
-// someone who died first but came back.
+// plus the royale resurrection path (a powerup pickup can revive an eliminated
+// marble): AMarbleRoyaleGameMode::RespawnMarble(PlayerState) — the function that
+// actually spawns the new pawn, verified by forcing respawns in live matches —
+// and URoyaleGameRespawnComponent::BP_RespawnPlayer as a second net. On respawn
+// the player's earlier elimination is erased so only the FINAL death (or
+// survival) determines their placement. A hook-free safety net backs this up at
+// match end: a standings leader who is "eliminated" but demonstrably alive was
+// resurrected, and is un-eliminated before the winner is chosen — so a
+// resurrected marble that goes on to win is crowned even if no hook saw the
+// respawn, and the loser slot isn't polluted by someone who died first but
+// came back.
 // Each Marble exposes its player name (_Username) and PlayerState by reflection,
 // so standings are reconstructed from authoritative, virtualization-proof events
 // with zero guessed offsets and no dependence on the UI having rendered.
@@ -198,6 +204,35 @@ static UObject* ReadObjProp(UObject* obj, const TCHAR* name)
     return o;
 }
 
+// Read a bool/bitfield property by name. Engine bitfields (bIsSpectator etc.)
+// share one byte; the FBoolProperty carries the exact byte offset and mask.
+static bool ReadBoolProp(UObject* obj, const TCHAR* name, bool& out)
+{
+    if (!obj) return false;
+    UClass* cls = SafeGetClassPrivate(obj);
+    if (!cls) return false;
+    for (FProperty* prop : TFieldRange<FProperty>(cls, EFieldIterationFlags::IncludeSuper))
+    {
+        if (!prop) continue;
+        std::wstring n;
+        try { n = prop->GetName(); } catch (...) { continue; }
+        if (n != name) continue;
+        try
+        {
+            auto* bp = static_cast<FBoolProperty*>(prop);
+            uint8 mask = bp->GetByteMask();
+            if (mask == 0 || (mask & (mask - 1)) != 0) return false;   // not a plausible bool prop
+            uint8 byteVal = 0;
+            const char* addr = reinterpret_cast<const char*>(obj) + prop->GetOffset_Internal() + bp->GetByteOffset();
+            if (!SafeReadBytes(addr, &byteVal, 1)) return false;
+            out = (byteVal & mask) != 0;
+            return true;
+        }
+        catch (...) { return false; }
+    }
+    return false;
+}
+
 // Read a string property (FString) by name.
 static bool ReadStrProp(UObject* obj, const TCHAR* name, std::wstring& out)
 {
@@ -206,6 +241,17 @@ static bool ReadStrProp(UObject* obj, const TCHAR* name, std::wstring& out)
     try { fp = obj->GetValuePtrByPropertyNameInChain<FStringRaw>(name); } catch (...) { return false; }
     if (!fp) return false;
     return SafeReadFString(fp, out);
+}
+
+// Replay/ghost marbles (GhostMarble_BP_C) derive from AMarble and sit near the
+// track — they must never enter the standings.
+static bool IsGhostMarble(UObject* obj)
+{
+    UClass* cls = SafeGetClassPrivate(obj);
+    if (!cls) return false;
+    std::wstring cn;
+    try { cn = cls->GetName(); } catch (...) { return false; }
+    return cn.find(L"Ghost") != std::wstring::npos;
 }
 
 // Resolve a display username from a Marble pawn OR a PlayerState. Marbles carry
@@ -424,6 +470,9 @@ namespace mik
     // BP_RespawnPlayer param-block offsets (PlayerState / return pawn).
     static std::atomic<int32_t>        g_offRespawnPS{-1};
     static std::atomic<int32_t>        g_offRespawnPawn{-1};
+    // RespawnMarble(APlayerState*) -> AMarbleRoyaleMarble* param-block offsets.
+    static std::atomic<int32_t>        g_offRespawn2PS{-1};
+    static std::atomic<int32_t>        g_offRespawn2Pawn{-1};
     static int                         g_elimDebugLeft = 0;   // per-match raw-read log budget
 
     static void ResetMatch()
@@ -629,16 +678,15 @@ class MikMarbleMod : public RC::CppUserModBase
         __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
-    // BP_RespawnPlayer(FPendingRoyalePlayerRespawn PlayerRespawn) -> APawn*
-    // Offsets in the param block (PlayerState inside the struct, return pawn)
-    // are resolved from the UFunction's param reflection at hook registration.
-    // Post-hook, so the return pawn is populated; prefer its _Username (same
-    // name source as the elimination records), fall back to the PlayerState.
-    static void HandleRespawnImpl(void* params)
+    // Common resurrection handler. `offPS`/`offPawn` locate the respawned
+    // player's PlayerState and the returned pawn in the hooked call's param
+    // block (post-hook, so the return value is populated). Prefer the pawn's
+    // _Username (same name source as the elimination records), fall back to
+    // the PlayerState.
+    static void HandleRespawnImpl(void* params, int32_t offPS, int32_t offPawn)
     {
         if (!params) return;
         const char* base = static_cast<const char*>(params);
-        const int32_t offPS = mik::g_offRespawnPS.load(), offPawn = mik::g_offRespawnPawn.load();
         UObject* pawn = nullptr; UObject* ps = nullptr;
         if (offPawn >= 0) SafeReadBytes(base + offPawn, &pawn, sizeof(pawn));
         if (offPS   >= 0) SafeReadBytes(base + offPS,   &ps,   sizeof(ps));
@@ -651,9 +699,20 @@ class MikMarbleMod : public RC::CppUserModBase
         mik::RecordRespawn(name);
         Output::send<LogLevel::Default>(STR("[MikMarble] respawn: {} (elimination erased)\n"), name);
     }
+    // BP_RespawnPlayer(FPendingRoyalePlayerRespawn PlayerRespawn) -> APawn*
     __declspec(noinline) static void HandleRespawn(void* params) noexcept
     {
-        __try { HandleRespawnImpl(params); }
+        __try { HandleRespawnImpl(params, mik::g_offRespawnPS.load(), mik::g_offRespawnPawn.load()); }
+        __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    // RespawnMarble(APlayerState* Player) -> AMarbleRoyaleMarble*
+    // This is the function that actually performs a resurrection — verified by
+    // forcing respawns in live 200-bot royales: RespawnMarble spawns the pawn
+    // while BP_RespawnPlayer (the wave-respawn wrapper) never fires. Both are
+    // hooked; RecordRespawn dedupes if a path ever triggers both.
+    __declspec(noinline) static void HandleRespawn2(void* params) noexcept
+    {
+        __try { HandleRespawnImpl(params, mik::g_offRespawn2PS.load(), mik::g_offRespawn2Pawn.load()); }
         __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
@@ -808,9 +867,28 @@ class MikMarbleMod : public RC::CppUserModBase
         fn->RegisterPostHook([](UnrealScriptFunctionCallableContext& ctx, void*) {
             HandleRespawn(ParamsBase(ctx));
         });
+
+        // The function that actually resurrects (see HandleRespawn2): hook it
+        // too — a powerup-triggered resurrection goes through here, NOT through
+        // BP_RespawnPlayer (verified in live 200-bot royales).
+        UFunction* fn2 = UObjectGlobals::StaticFindObject<UFunction*>(
+            nullptr, nullptr, STR("/Script/MarblesOnStream.MarbleRoyaleGameMode:RespawnMarble"));
+        int32_t off2PS = -1, off2Ret = -1;
+        if (fn2)
+        {
+            off2PS  = FindParamOffset(fn2, L"Player");
+            off2Ret = FindParamOffset(fn2, L"ReturnValue");
+            mik::g_offRespawn2PS.store(off2PS >= 0 ? off2PS : 0);
+            mik::g_offRespawn2Pawn.store(off2Ret);
+            fn2->RegisterPostHook([](UnrealScriptFunctionCallableContext& ctx, void*) {
+                HandleRespawn2(ParamsBase(ctx));
+            });
+        }
+
         m_respawnHookRegistered = true;
-        Output::send<LogLevel::Default>(STR("[MikMarble] respawn hook registered (param off {}, ret off {})\n"),
-                                        offRespawn, offRet);
+        Output::send<LogLevel::Default>(
+            STR("[MikMarble] respawn hooks registered (BP_RespawnPlayer off {}/{}, RespawnMarble={} off {}/{})\n"),
+            offRespawn, offRet, fn2 ? 1 : 0, off2PS, off2Ret);
     }
 
     // ── Build standings from the accumulated events ──────────────────────────
@@ -819,11 +897,20 @@ class MikMarbleMod : public RC::CppUserModBase
     {
         // Marbles still alive at match end (e.g. the royale winner) were never
         // seen by a finish/elim hook, so their username→display pair is missing
-        // from the kill-count join — sweep the live marbles to fill it in.
+        // from the kill-count join — sweep the live marbles to fill it in, and
+        // remember who is still standing for the resurrection reconciliation.
+        std::set<std::wstring> aliveSet;   // lowercase usernames of live marbles
         {
             std::vector<UObject*> marbles;
             UObjectGlobals::FindAllOf(STR("Marble"), marbles);
-            for (UObject* m : marbles) NoteMarbleNames(m, ResolveUsername(m));
+            for (UObject* m : marbles)
+            {
+                if (IsGhostMarble(m)) continue;
+                std::wstring n = ResolveUsername(m);
+                if (n.empty()) continue;
+                NoteMarbleNames(m, n);
+                aliveSet.insert(ToLowerW(n));
+            }
         }
 
         std::vector<std::wstring> finishOrder, elimOrder;
@@ -874,6 +961,22 @@ class MikMarbleMod : public RC::CppUserModBase
             // the last-eliminated marble is the winner. The very last entry is then
             // the first eliminated: the loser.
             std::wstring leader = ResolveUsername(ReadFirstArrayElem(gs, STR("Top10")));
+
+            // Resurrection safety net (no hook dependency): if the standings
+            // leader is in our eliminated set but their marble is demonstrably
+            // ALIVE at match end, they died and were resurrected (powerup) by a
+            // path our respawn hooks didn't see — the aliveness is the proof.
+            // Un-eliminate them so they're crowned instead of being reported at
+            // their stale pre-resurrection death slot.
+            if (!leader.empty() && elimSet.count(leader) && aliveSet.count(ToLowerW(leader)))
+            {
+                Output::send<LogLevel::Default>(
+                    STR("[MikMarble] leader {} was eliminated but is alive at match end (resurrected) — un-eliminating\n"),
+                    leader);
+                elimSet.erase(leader);
+                elimOrder.erase(std::remove(elimOrder.begin(), elimOrder.end(), leader), elimOrder.end());
+            }
+
             std::wstring winner;
             if (!leader.empty() && elimSet.find(leader) == elimSet.end()) winner = leader;
             else if (!elimOrder.empty())                                  winner = elimOrder.back();
@@ -925,7 +1028,9 @@ class MikMarbleMod : public RC::CppUserModBase
         // GameMode placement lookup. Order here is irrelevant; we re-rank below.
         std::vector<UObject*> roster;
         std::set<UObject*> rosterSet;
-        auto addMarble = [&](UObject* m) { if (m && rosterSet.insert(m).second) roster.push_back(m); };
+        auto addMarble = [&](UObject* m) {
+            if (m && !IsGhostMarble(m) && rosterSet.insert(m).second) roster.push_back(m);
+        };
 
         UObject* gm = UObjectGlobals::FindFirstOf(STR("MarbleRaceGameMode"));
         UFunction* fnPos = nullptr;
@@ -933,15 +1038,22 @@ class MikMarbleMod : public RC::CppUserModBase
         int expected = ReadPlayerArrayNum(gs);
         int maxPos = (expected > 0 && expected < 1024) ? expected + 4 : 256;
         if (gm && fnPos)
-            for (int pos = 1, misses = 0; pos <= maxPos && misses < 4; ++pos)
-            {
+            for (int pos = 1; pos <= maxPos; ++pos)   // scan ALL positions — large
+            {                                          // fields have >=4-slot gaps
                 UObject* m = CallIntToObj(gm, fnPos, pos);
-                if (!m) { ++misses; continue; }
-                misses = 0;
-                addMarble(m);
+                if (m) addMarble(m);
             }
         if (finishActor)
             for (UObject* m : ReadObjectArray(finishActor, STR("FinishedMarbles"))) addMarble(m);
+        // Nobody despawns in bullseye, so every marble actor is still live at
+        // match end — the sweep catches marbles the position lookup has no slot
+        // for (e.g. never settled). Verified on 200-bot fields: the position
+        // scan alone missed several marbles, including the true last place.
+        {
+            std::vector<UObject*> marbles;
+            UObjectGlobals::FindAllOf(STR("Marble"), marbles);
+            for (UObject* m : marbles) addMarble(m);
+        }
 
         // Rank every marble by distance² to the centre — closest first (winner),
         // farthest last (loser, including any off-target marble).
@@ -968,6 +1080,34 @@ class MikMarbleMod : public RC::CppUserModBase
         // we still report something rather than dropping the match.
         if (out.empty())
             for (UObject* m : roster) { std::wstring n = ResolveUsername(m); if (!n.empty() && seen.insert(n).second) out.push_back({n, true}); }
+
+        // Marbles that flew off without settling get DESTROYED, so they have no
+        // actor to rank — and the game places them at the very bottom (verified
+        // on 200-bot fields: the missing names were exactly the last places).
+        // Recover them from PlayerArray and append; skip spectators/inactive
+        // PlayerStates (a non-racing host). Their order within this bottom block
+        // is not recoverable (the game sorts them by an inaccessible leave time).
+        if (!out.empty())
+        {
+            std::set<std::wstring> seenLow;
+            for (const auto& p : out) seenLow.insert(ToLowerW(p.name));
+            int appended = 0;
+            for (UObject* ps : ReadObjectArray(gs, STR("PlayerArray")))
+            {
+                std::wstring n = ResolveUsername(ps);
+                if (n.empty() || !seenLow.insert(ToLowerW(n)).second) continue;
+                bool spec = false, onlySpec = false, inactive = false;
+                ReadBoolProp(ps, STR("bIsSpectator"),   spec);
+                ReadBoolProp(ps, STR("bOnlySpectator"), onlySpec);
+                ReadBoolProp(ps, STR("bIsInactive"),    inactive);
+                if (spec || onlySpec || inactive) continue;
+                out.push_back({n, true});
+                ++appended;
+                Output::send<LogLevel::Default>(STR("[MikMarble] bullseye: appended off-map marble {} (no actor to rank)\n"), n);
+            }
+            if (appended > 0)
+                Output::send<LogLevel::Default>(STR("[MikMarble] bullseye: {} off-map marbles appended at the bottom\n"), appended);
+        }
 
         std::wstring first = out.empty() ? std::wstring(STR("(none)")) : out.front().name;
         std::wstring last  = out.empty() ? std::wstring(STR("(none)")) : out.back().name;
@@ -1115,7 +1255,7 @@ public:
     MikMarbleMod() : CppUserModBase()
     {
         ModName        = STR("MikMarbleMod");
-        ModVersion     = STR("3.19");
+        ModVersion     = STR("3.20");
         ModDescription = STR("Mik marbles race result tracker (C++, event-driven)");
         ModAuthors     = STR("Draxi");
 
@@ -1127,7 +1267,7 @@ public:
             std::string host, path; int port = 0;
             { std::lock_guard<std::mutex> lock(self->m_configMutex); host = self->m_config.host; port = self->m_config.port; path = self->m_config.path; }
 
-            ImGui::Text("MikMarbleMod v3.19 (C++, event-driven)");
+            ImGui::Text("MikMarbleMod v3.20 (C++, event-driven)");
             ImGui::Text("Endpoint: %s:%d%s", host.c_str(), port, path.c_str());
             ImGui::Text("Hooks: %s", self->m_hooksRegistered ? "registered" : "waiting for HUD...");
             ImGui::Text("Respawn hook: %s", self->m_respawnHookRegistered ? "registered" : "waiting for royale...");
@@ -1173,7 +1313,7 @@ public:
     {
         std::wstring wHost(m_config.host.begin(), m_config.host.end());
         std::wstring wPath(m_config.path.begin(), m_config.path.end());
-        Output::send<LogLevel::Default>(STR("[MikMarble] Mod initialized (C++ v3.19) -> {}:{}{}\n"), wHost, m_config.port, wPath);
+        Output::send<LogLevel::Default>(STR("[MikMarble] Mod initialized (C++ v3.20) -> {}:{}{}\n"), wHost, m_config.port, wPath);
         m_unrealReady.store(true);
     }
 

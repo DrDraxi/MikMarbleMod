@@ -32,12 +32,17 @@ scraping the result UI. At a high level:
      (kill) counts** are also event-derived.
    - `OnMatchEnded()` → the single authoritative "results are final" trigger.
 
-   A fourth hook, `URoyaleGameRespawnComponent::BP_RespawnPlayer` (registered
-   lazily — the component only exists during a royale), handles **royale
-   resurrections**: the respawned player's earlier elimination is erased, so only
-   their *final* death (or survival) determines placement. A resurrected marble
-   that goes on to win is correctly crowned, and the loser slot isn't polluted by
-   someone who died first but came back.
+   **Royale resurrections** (a powerup can revive an eliminated marble) are
+   handled by hooking `AMarbleRoyaleGameMode::RespawnMarble(PlayerState)` — the
+   function that actually spawns the new pawn, verified by forcing respawns in
+   live matches (`URoyaleGameRespawnComponent::BP_RespawnPlayer` is also hooked
+   as a second net but never fired in testing). On respawn the player's earlier
+   elimination is erased, so only their *final* death (or survival) determines
+   placement. A hook-free safety net backs this up: at match end, a standings
+   leader who is "eliminated" but demonstrably alive was resurrected and is
+   un-eliminated before the winner is chosen. So a resurrected marble that goes
+   on to win is correctly crowned, and the loser slot isn't polluted by someone
+   who died first but came back.
 
    Each `Marble` exposes its player name (`_Username`) and `PlayerState` by
    reflection, so standings are rebuilt from authoritative, virtualization-proof
@@ -60,7 +65,11 @@ scraping the result UI. At a high level:
      `UObject::ProcessEvent`). Closest first (winner), farthest last (loser); all
      marbles report `finished: true`. Distance is the actual scoring metric —
      `Top10`, `FinishedMarbles` (settle order), and `FindMarbleAtPosition` (finish
-     time) were each verified *not* to encode the target placement.
+     time) were each verified *not* to encode the target placement. Marbles that
+     fly off without settling are destroyed by the game (no actor to rank); they
+     are recovered from `PlayerArray` (spectators/inactive excluded) and appended
+     at the bottom — the tier the game puts them in — though their order within
+     that bottom block is approximate. Replay ghost marbles are excluded.
 
 Per-match accumulators reset whenever the `GameState` instance changes (a new
 match). Reading is on the game thread; the HTTP POST is detached so a slow server
@@ -272,7 +281,7 @@ sensitive — if matches start missing, recapture them on your display.
 
 ## Versioning / packaging
 
-`ModVersion` is set in `dllmain.cpp` (currently `3.19`). To cut a release, build,
+`ModVersion` is set in `dllmain.cpp` (currently `3.20`). To cut a release, build,
 then refresh `dist/ue4ss/Mods/MikMarbleMod/dlls/main.dll` with the new
 `MikMarbleMod.dll` and zip the `dist/` contents. The bundle does **not** ship a
 `config.txt` — the mod auto-creates it (with `path=/mod`) next to the DLL on first

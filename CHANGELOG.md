@@ -2,6 +2,43 @@
 
 All notable changes to MikMarbleMod are documented here.
 
+## [3.20] - 2026-07-02
+
+Resurrection handling fixed against live-verified behavior. Forced-respawn
+testing in 200-bot royales (a throwaway Lua mod calling the game's own
+`RespawnMarble`) showed that resurrections do NOT go through the
+`BP_RespawnPlayer` hook that 3.19 relied on — and one test match reproduced the
+original bug exactly (a bot died, was resurrected, won, and the payload crowned
+the wrong player while listing the real winner mid-table).
+
+### Fixed
+- **Hook the function that actually resurrects:**
+  `AMarbleRoyaleGameMode::RespawnMarble(PlayerState)` (returns the new pawn).
+  `BP_RespawnPlayer` (the wave-respawn wrapper, which never fired in testing)
+  stays hooked as a second net; the respawn recorder dedupes.
+- **Hook-free safety net:** at match end, if the standings leader (`Top10[0]`)
+  is in the eliminated set but their marble is demonstrably still alive, they
+  were resurrected by a path no hook saw — they are un-eliminated before the
+  winner is chosen. Aliveness at match end is the proof; this catches any
+  resurrection mechanism, present or future.
+- **Bullseye on large fields (200 marbles):** the roster scan used to stop after
+  4 consecutive empty position slots, silently dropping the tail — including the
+  true last place. It now scans the full position range and sweeps all live
+  marble actors. Marbles that fly off without settling are DESTROYED by the
+  game and can't be ranked geometrically; they're recovered from `PlayerArray`
+  (spectator/inactive PlayerStates excluded, so a non-racing host is never
+  added) and appended at the bottom, where the game itself places them. Their
+  order *within* that bottom block is approximate (the game sorts it by an
+  inaccessible leave time). Verified twice at 200 marbles: full roster, winner
+  and loser both matching the game's own export.
+- **Replay ghost marbles (`GhostMarble_BP_C`) are excluded** from all marble
+  sweeps — one sat at the target centre and "won" a test bullseye.
+
+### Testing
+- All modes verified at 200 players against the game's own results export
+  (copy-to-clipboard TSV): 6 royales (3 with forced resurrections via the
+  game's `RespawnMarble`), 2 random races, 2 death races, 4 bullseyes.
+
 ## [3.19] - 2026-07-01
 
 Royale resurrection support + per-player elimination counts.
