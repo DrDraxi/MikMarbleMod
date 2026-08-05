@@ -10,7 +10,21 @@ def catch_all():
 
 @app.route('/mod/ready', methods=['POST'])
 def mod_ready():
-    return jsonify({"message": "The mod is ready"}), 200
+    # The mod sends {"mod": "MikMarbleMod", "version": "x.y"} so a backend can
+    # tell which build is talking to it. Older builds sent {} — treat the
+    # fields as optional rather than required.
+    info = {}
+    try:
+        info = request.get_json(silent=True) or {}
+    except Exception:
+        pass
+    version = info.get('version')
+    mod_name = info.get('mod', 'mod')
+    if version:
+        print(f"Ready: {mod_name} v{version}")
+    else:
+        print(f"Ready: {mod_name} (no version reported — pre-3.21 build?)")
+    return jsonify({"message": "The mod is ready", "version": version}), 200
 
 @app.route('/mod/results', methods=['POST'])
 def receive_results():

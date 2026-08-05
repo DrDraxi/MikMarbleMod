@@ -20,7 +20,9 @@ scraping the result UI. At a high level:
 1. **Load config** (`config.txt` next to the DLL) — endpoint `host` / `port` /
    `path`. If the file is missing it is auto-created with defaults (`path=/mod`).
 2. Once Unreal is initialized it fires a one-shot `POST {path}/ready` so the
-   server knows the mod is live.
+   server knows the mod is live. The body identifies the build:
+   `{"mod": "MikMarbleMod", "version": "3.21"}`. Builds before 3.21 sent `{}`,
+   so treat both fields as optional if you need to support older mods.
 3. When a match's HUD appears it registers post-hooks (via `UFunction::RegisterPostHook`)
    on three native `AMarbleRaceHUDY2` events (the royale HUD derives from it, so
    one set of hooks covers both modes), resolving them by walking the class's
@@ -71,6 +73,16 @@ scraping the result UI. At a high level:
      at the bottom — the tier the game puts them in — though their order within
      that bottom block is approximate. Replay ghost marbles are excluded.
 
+     **Accuracy, measured (200-marble bullseye, UE 5.8):** winner and loser exact;
+     the top ~2/3 of the order matches the game's own results table exactly, then
+     the tail diverges (138/200 exact, mean rank delta 6.4). This is inherent to
+     the mode rather than a bug: the game's table awards points to the **top three
+     only** (400/300/200) and leaves *every* other player on **0**, so below rank 3
+     there is no score to reproduce and the distance ranking is a reconstruction.
+     The off-map marbles the mod appends do land in the right tier — in that run
+     the 4 it flagged were exactly the last 4 rows of the game's table. Treat
+     bullseye placements below the podium as approximate; winner/loser are solid.
+
 Per-match accumulators reset whenever the `GameState` instance changes (a new
 match). Reading is on the game thread; the HTTP POST is detached so a slow server
 can't stall the game.
@@ -101,6 +113,105 @@ whether the hooks are registered, and the last standings sent.
 
 ---
 
+## Engine updates (currently UE 5.8)
+
+**The game is on Unreal Engine 5.8** (`++UE5+Release-5.8-CL-55116800`). Upstream
+UE4SS only ships support up to 5.7, so this repo carries its own 5.8 support.
+When the game jumps engine version again, expect the same three failure classes —
+none of them are bugs in `dllmain.cpp`, and all of them stop the mod from loading
+at all:
+
+1. **`FName::FName(wchar_t*)` fails to resolve** → the pattern scan aborts
+   (`Scan failed` on repeat, then `Fatal Error: PS scan timed out`). In 5.8 the
+   `EFindName` argument is set *inside* the constructor, so upstream's call-site
+   patterns (`41 B8 01 00 00 00`) match nothing. Fixed by
+   `dist/ue4ss/UE4SS_Signatures/FName_Constructor.lua`, which matches the
+   constructor's own prologue. The `0F B7 02` (16-bit load) in that signature is
+   load-bearing — it distinguishes the WIDECHAR overload from the byte-indexed
+   ANSICHAR one sitting 0xA0 earlier.
+
+2. **`Fatal Error: Engine version is not supported.`** → no versioned container
+   for the new version. Fixed properly by generating one (see below). Do **not**
+   paper over this with `[EngineVersionOverride]`; forcing 5.7 on a 5.8 binary
+   gets past the check and then hangs forever in
+   `while (UObjectArray::GetNumElements() < 10000)`, burning a core, because the
+   object-array offsets are wrong.
+
+3. **`GUObjectArray` resolves to the wrong address** → same infinite
+   `Waiting for object construction...` hang. UE 5.8 moved `ObjObjects` from
+   offset `0x10` to `0x0` (and `FUObjectArray` grew `0xC0` → `0xE8`), so
+   patternsleuth's stale correction lands on base + 0x68. Fixed by
+   `dist/ue4ss/UE4SS_Signatures/GUObjectArray.lua`, which deliberately does *not*
+   subtract `0x10` the way the bundled `.example` does.
+
+### Regenerating the versioned container for a new UE version
+
+UE4SS derives its offsets from engine **PDB debug symbols** via its own bundled
+tool, **UVTD** (`RE-UE4SS/UVTD`, CMake target `UnrealVTableDumper`). The version
+list lives in `RE-UE4SS/assets/Default_UVTD_Configs/Config/pdbs_to_dump.json`.
+
+1. Produce a PDB with `tools/get-ue-pdb.ps1` (see `tools/PDB-GENERATION-PROMPT.md`).
+   It must be a **monolithic Win64 Shipping** build of the **matching engine
+   revision** — layouts differ between build configs (`#if !UE_BUILD_SHIPPING`)
+   and between patch releases. Match `CompatibleChangelist` in
+   `Engine/Build/Build.version` against the game's `CL-…`.
+2. Run UVTD from a **short path** (e.g. `C:\uvtd58`) with `Config/` and
+   `PDBs/<X_YY>.pdb` beside the exe, and `pdbs_to_dump.json` listing only the new
+   PDB. Long paths blow past `MAX_PATH` and it silently emits only a few files.
+   Output goes to a staging tree `UVTD_Generated_Output/`, not into the repo.
+3. Copy **only** `<X_YY>_*` FunctionBodies plus `UnrealVirtual<XYY>.hpp/.cpp`
+   into `RE-UE4SS/deps/first/Unreal/`. Do **not** copy the shared wrappers or
+   `MacroSetter.hpp` — regenerated from one PDB they lose every other version's
+   members (`MacroSetter.hpp` shrinks ~126 KB → ~102 KB). A correct import shows
+   as purely untracked additions, zero modifications.
+4. Add the `Version::IsEqual(X, YY)` branch in
+   `RE-UE4SS/deps/first/Unreal/src/VersionedContainer/Container.cpp`.
+5. Re-run CMake configure (the source globs are evaluated at configure time, so
+   a new `.cpp` is otherwise ignored), then `build.bat --deploy`.
+
+> **Gotcha that costs a whole debug cycle:** UE4SS is loaded from
+> `…\Win64\ue4ss\UE4SS.dll`, *not* the Win64 root. Deploying it to the root
+> leaves the old DLL in place and the game keeps running the stale build while
+> your rebuilds appear to do nothing. `build.bat` deploys to the right place now.
+
+### Where the 5.8 support actually lives (and how to get it back)
+
+The 5.8 container lives in a **nested submodule**,
+`RE-UE4SS/deps/first/Unreal` (= `Re-UE4SS/UEPseudo`), which is outside this
+repo's git. `setup.bat`, `git submodule update`, or any submodule reset will
+detach it back to the pinned upstream commit and **the 5.8 files vanish** — after
+which UE4SS still builds but aborts at runtime with
+`Engine version is not supported.`
+
+The 5.8 work is therefore kept on **our own fork** of that submodule —
+`DrDraxi/UEPseudo`, branch **`ue5.8-support`** (commit `852378a`) — which is the
+canonical source for it. `setup.bat` restores it automatically after initialising
+submodules, and it can be run by hand any time:
+
+```powershell
+tools\restore-ue58-support.ps1 -Check   # is 5.8 support present?
+tools\restore-ue58-support.ps1          # put it back
+```
+
+Then re-run CMake configure (globs are configure-time) and `build.bat --deploy`.
+
+> No upstream PR was opened. `Re-UE4SS/UEPseudo` is a **private** repo and its
+> 5.7 support landed as a direct maintainer push rather than a PR
+> ([commit `0ecd6de`](https://github.com/Re-UE4SS/UEPseudo/commit/0ecd6de2d807806cc57acc9464c7feafb466119b)),
+> so a fork PR isn't the channel maintainers watch. If upstream ever adds 5.8,
+> drop the fork and this script.
+>
+> For reference, our change matches that precedent's shape: additive tables,
+> shared wrappers untouched. No `Derived508` is needed — that layer was deleted
+> in `efdd6f8` — and every other version arm in the codebase uses `IsAtLeast`,
+> which 5.8 satisfies; the only `IsEqual(5, N)` checks live in `Container.cpp`.
+
+**End users are unaffected** — `dist/` ships prebuilt binaries, so the release
+bundle already contains a 5.8-capable `ue4ss/UE4SS.dll` plus the two signature
+overrides. Only building from source needs any of the above.
+
+---
+
 ## Repository layout
 
 ```
@@ -113,6 +224,10 @@ MikMarbleMod/
 ├── src/MikMarbleMod/
 │   ├── dllmain.cpp               # the entire mod
 │   └── CMakeLists.txt            # mod build target
+├── tools/
+│   ├── get-ue-pdb.ps1            # builds a UE Shipping PDB (input for UVTD)
+│   ├── PDB-GENERATION-PROMPT.md  # self-contained prompt for the build machine
+│   └── restore-ue58-support.ps1  # re-applies UE 5.8 support after a submodule reset
 ├── dist/                         # PREBUILT, ready-to-run bundle (see "Run without building")
 │   ├── dwmapi.dll                # UE4SS proxy DLL
 │   └── ue4ss/…                   # UE4SS runtime + Mods/MikMarbleMod/dlls/main.dll
@@ -199,7 +314,42 @@ The mod looks for `config.txt` next to its DLL
 host=127.0.0.1
 port=5000
 path=/mod
+
+# Optional: players to leave out of reported results.
+ignore=DrDraxi, SomeModerator
+ignore=AnotherName
 ```
+
+### `ignore` — omitting players from results
+
+Optional and off by default. Comma-separated display names; the key may be
+repeated to append, whitespace is trimmed, blank entries and `#` comments are
+skipped.
+
+Matching is **exact but case-insensitive** — this matters in practice: the game
+reports the local player's name lower-cased (`drdraxi`), so a case-sensitive
+match on `DrDraxi` would silently never fire. It is *not* a prefix/substring
+match, so `Bob` does not match `Bobby`.
+
+Applied to **race, death race and bullseye**. Deliberately **not** applied to
+**royale**, where placement is reconstructed from elimination order — dropping
+entries there would misreport who actually went out first and last.
+
+On startup the mod echoes what it loaded, so a typo is obvious immediately:
+
+```
+[MikMarble] ignore list: 2 name(s) loaded -> drdraxi, somemoderator
+```
+
+and per match it reports how many it removed:
+
+```
+[MikMarble] ignore list: omitted 1 player(s) from results
+```
+
+If every player is filtered (e.g. racing solo while ignoring yourself), the mod
+sends `{"type": "race", "players": []}`; the bundled server accepts it and
+reports `winner: null` / `loser: null`.
 
 The mod POSTs to `{path}/ready` and `{path}/results`, so with `path=/mod` it hits
 `/mod/ready` and `/mod/results` — which is exactly what the bundled `server.py`
@@ -218,7 +368,8 @@ python server/server.py            # listens on 0.0.0.0:5000
 
 Endpoints:
 
-- `POST /mod/ready`   → `200` ("mod is ready" handshake)
+- `POST /mod/ready`   → `200` handshake. Logs the reporting build, e.g.
+  `Ready: MikMarbleMod v3.21`, and echoes the version back in the response.
 - `POST /mod/results` → validates the payload and prints the standings, the
   winner, and (for royales) the loser; echoes the parsed result back as JSON.
 
@@ -281,7 +432,17 @@ sensitive — if matches start missing, recapture them on your display.
 
 ## Versioning / packaging
 
-`ModVersion` is set in `dllmain.cpp` (currently `3.20`). To cut a release, build,
+The version is written in **three** places in `dllmain.cpp` and they are *not*
+derived from each other — update all three or the mod will report a stale
+version (the log line is the one the install instructions tell users to check):
+
+| line | what |
+|---|---|
+| ~1258 | `ModVersion = STR("3.21");` |
+| ~1270 | `ImGui::Text("MikMarbleMod v3.21 …")` — debug panel |
+| ~1316 | `[MikMarble] Mod initialized (C++ v3.21)` — the log line users verify |
+
+`ModVersion` is set in `dllmain.cpp` (currently `3.21`). To cut a release, build,
 then refresh `dist/ue4ss/Mods/MikMarbleMod/dlls/main.dll` with the new
 `MikMarbleMod.dll` and zip the `dist/` contents. The bundle does **not** ship a
 `config.txt` — the mod auto-creates it (with `path=/mod`) next to the DLL on first

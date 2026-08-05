@@ -1,7 +1,10 @@
-MikMarbleMod 3.17 — install
+MikMarbleMod 3.21 — install
 ===========================
 
 This bundle is a complete, ready-to-run UE4SS install with MikMarbleMod.
+
+Requires the UE 5.8 version of Marbles on Stream (Steam build 24556537 or
+later). See "Important" at the bottom.
 
 1. Find your game's Win64 folder:
    <Steam>\steamapps\common\Marbles on Stream\MarblesOnStream\Binaries\Win64\
@@ -13,17 +16,59 @@ This bundle is a complete, ready-to-run UE4SS install with MikMarbleMod.
 3. Launch the game. UE4SS loads the mod from
      ue4ss\Mods\MikMarbleMod\dlls\main.dll
 
-What it does
-------------
-At the end of each race / royale it POSTs the final standings as JSON:
+4. Confirm it worked. In ue4ss\UE4SS.log you should see:
+     Using engine version: 5.8
+     [MikMarble] Mod initialized (C++ v3.21) -> 127.0.0.1:5000/mod
 
-  POST {path}/results
-  {"type":"race"|"royale","players":[{"name":"Alice","finished":true}, ...]}
 
-Players are ordered finishers-first, then DNFs, so the LAST entry is the loser.
-
-Endpoint
+HTTP API
 --------
+Two endpoints, both POST, both relative to `path` from config.txt (default /mod).
+
+1) POST {path}/ready — one-shot handshake once the mod is live.
+
+   {"mod": "MikMarbleMod", "version": "3.21"}
+
+   Lets a backend know which build is talking to it. Versions before 3.21 sent
+   an empty object {}, so treat both fields as optional.
+
+2) POST {path}/results — sent once per match, when the results are final.
+
+   {
+     "type": "race",
+     "players": [
+       {"name": "Alice", "finished": true,  "eliminations": 2},
+       {"name": "Bob",   "finished": false, "eliminations": 0}
+     ]
+   }
+
+   type          "race" (includes death race), "royale", or "bullseye"
+   name          the player's display name
+   finished      did they finish / survive
+   eliminations  kills credited to that player (0 for environmental deaths,
+                 and always 0 in bullseye)
+
+   ORDER IS THE RESULT. Players are listed in placement order: winner FIRST,
+   and the LAST entry is the loser. Finishers come first, then DNFs ordered so
+   that the first player eliminated ends up last in the list.
+
+   Notes per mode:
+     race      finishers in finish order, then DNFs in reverse-elimination order
+     royale    winner first, then everyone else in reverse-elimination order.
+               If a royale TIMES OUT with marbles still alive, only the winner
+               and the eliminated players are reported — the surviving
+               mid-table players have no event-derived ranking.
+     bullseye  ranked by distance to the target centre; every player reports
+               finished: true. The game itself only scores the top three, so
+               placements below the podium are a best-effort reconstruction —
+               winner and loser are reliable, mid-field is approximate.
+
+   The list can legitimately be EMPTY (e.g. every player is on the ignore list
+   below), so handle that rather than assuming at least one entry.
+
+
+config.txt
+----------
 On first launch the mod auto-creates:
      ue4ss\Mods\MikMarbleMod\config.txt
 
@@ -33,4 +78,35 @@ with these defaults (which match the bundled dummy server, server/server.py):
   port=5000
   path=/mod        # POSTs to /mod/ready and /mod/results
 
-To use your own backend, edit that file after the first launch and restart.
+  # Optional: players to leave out of reported results.
+  # Comma-separated; the key may be repeated to add more.
+  ignore=SomeName, AnotherName
+  ignore=ThirdName
+
+`ignore` is off by default. Matching is exact but CASE-INSENSITIVE, and is not
+a partial match ("Bob" does not match "Bobby"). It applies to race, death race
+and bullseye — but NOT to royale, where placement is derived from elimination
+order and removing players would misreport who went out first and last.
+
+On startup the mod prints the list it loaded, and after each match how many it
+removed, so a typo is easy to spot:
+
+  [MikMarble] ignore list: 2 name(s) loaded -> somename, anothername
+  [MikMarble] ignore list: omitted 1 player(s) from results
+
+To use your own backend, edit config.txt after the first launch and restart.
+
+
+Important — this bundle ships a custom UE4SS
+--------------------------------------------
+Marbles on Stream runs on Unreal Engine 5.8, which upstream UE4SS does not
+support. This bundle therefore includes a patched build:
+
+  ue4ss\UE4SS.dll
+  ue4ss\UE4SS_Signatures\FName_Constructor.lua
+  ue4ss\UE4SS_Signatures\GUObjectArray.lua
+
+Do NOT replace these with a stock UE4SS release, and do not delete the
+UE4SS_Signatures folder — without them UE4SS fails to start and no mod loads
+at all (the log will show "PS scan timed out", "Engine version is not
+supported", or it will hang on "Waiting for object construction...").

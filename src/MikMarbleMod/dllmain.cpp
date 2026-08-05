@@ -78,12 +78,37 @@ using namespace RC::Unreal;
 
 static constexpr const char* kDefaultPath = "/mod";
 
+// Narrow copy of the mod version, for JSON payloads and ImGui (both of which
+// want char, while ModVersion must be a wide STR() literal). Keep in sync with
+// the ModVersion assignment in the constructor -- the log line derives from
+// ModVersion, so those two are the only places a version string is written.
+static constexpr const char* kModVersion = "3.21";
+
 struct ModConfig
 {
     std::string host = "127.0.0.1";
     int         port = 5000;
     std::string path = kDefaultPath;
+
+    // Optional: display names to omit from reported results, stored lower-cased.
+    // Empty (the default) keeps every player, so behaviour is unchanged unless
+    // the user opts in. Deliberately NOT applied to royale -- see SendResults.
+    std::vector<std::string> ignoredNames;
 };
+
+// ASCII-only lower-casing, used for case-insensitive name matching.
+// std::tolower() takes an int and is UB for negative values, which is exactly
+// what a plain `char` gives you for any non-ASCII UTF-8 byte. Restricting to
+// A-Z sidesteps that entirely and leaves every other byte untouched, so
+// non-ASCII names still compare correctly (just case-sensitively).
+static std::string AsciiLower(std::string s)
+{
+    for (char& c : s)
+    {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return s;
+}
 
 static std::filesystem::path GetModDirectory()
 {
@@ -117,6 +142,13 @@ static ModConfig LoadConfig()
             out << "host=127.0.0.1\n";
             out << "port=5000\n";
             out << "path=" << kDefaultPath << "\n";
+            out << "\n";
+            out << "# Optional: players to leave out of reported results.\n";
+            out << "# Comma-separated display names, matched exactly but\n";
+            out << "# case-insensitively. The key may be repeated to add more.\n";
+            out << "# Applies to race, death race and bullseye -- NOT to royale,\n";
+            out << "# where placement is derived from elimination order.\n";
+            out << "# ignore=SomeName,AnotherName\n";
             return cfg;
         }
 
@@ -132,6 +164,21 @@ static ModConfig LoadConfig()
             if (key == "host") cfg.host = val;
             else if (key == "port") { try { cfg.port = std::stoi(val); } catch (...) {} }
             else if (key == "path") cfg.path = val;
+            else if (key == "ignore" || key == "ignored" || key == "ignore_names")
+            {
+                // Comma-separated. Repeating the key appends rather than
+                // replaces, so a long list can be split across lines.
+                size_t pos = 0;
+                while (pos <= val.size())
+                {
+                    size_t comma = val.find(',', pos);
+                    size_t len   = (comma == std::string::npos) ? std::string::npos : comma - pos;
+                    std::string name = Trim(val.substr(pos, len));
+                    if (!name.empty()) cfg.ignoredNames.push_back(AsciiLower(name));
+                    if (comma == std::string::npos) break;
+                    pos = comma + 1;
+                }
+            }
         }
     }
     catch (...) { /* fall back to defaults */ }
@@ -1125,13 +1172,43 @@ class MikMarbleMod : public RC::CppUserModBase
         if (!m_state->httpBusy.compare_exchange_strong(expected, true)) return;  // one POST at a time
         m_state->inflight.fetch_add(1);
 
-        std::string json = BuildResultsJson(players, gameType);
-        auto playersCopy = players;
-        { std::lock_guard<std::mutex> lock(m_state->mtx); m_state->lastGameType = gameType; }
-
+        // Snapshot the config once, by value: the worker thread below must not
+        // touch m_config, and the ignore list is needed before the JSON is built.
         std::string host, path; int port = 0;
-        { std::lock_guard<std::mutex> lock(m_configMutex); host = m_config.host; port = m_config.port; path = m_config.path; }
+        std::vector<std::string> ignored;
+        {
+            std::lock_guard<std::mutex> lock(m_configMutex);
+            host = m_config.host; port = m_config.port; path = m_config.path;
+            ignored = m_config.ignoredNames;
+        }
         std::string resultsPath = path + "/results";
+
+        // Optional ignore list. Applied to race / death race / bullseye, but NOT
+        // royale: there, placement is reconstructed from elimination order, so
+        // removing entries would misreport who actually went out first and last.
+        // Filtering happens here on the game thread, before anything is copied
+        // into the worker, so the POST body and the ImGui panel agree.
+        std::vector<PlayerResult> outPlayers = players;
+        if (!ignored.empty() && gameType != "royale")
+        {
+            const size_t before = outPlayers.size();
+            outPlayers.erase(std::remove_if(outPlayers.begin(), outPlayers.end(),
+                                            [&ignored](const PlayerResult& p) {
+                                                const std::string n = AsciiLower(WideToUtf8(p.name));
+                                                return std::find(ignored.begin(), ignored.end(), n) != ignored.end();
+                                            }),
+                             outPlayers.end());
+            const size_t removed = before - outPlayers.size();
+            if (removed > 0)
+            {
+                Output::send<LogLevel::Default>(STR("[MikMarble] ignore list: omitted {} player(s) from results\n"),
+                                                removed);
+            }
+        }
+
+        std::string json = BuildResultsJson(outPlayers, gameType);
+        auto playersCopy = outPlayers;
+        { std::lock_guard<std::mutex> lock(m_state->mtx); m_state->lastGameType = gameType; }
 
         auto state = m_state;
         std::thread([state, json = std::move(json), playersCopy = std::move(playersCopy), host, port, resultsPath]() noexcept {
@@ -1158,10 +1235,15 @@ class MikMarbleMod : public RC::CppUserModBase
         { std::lock_guard<std::mutex> lock(m_configMutex); host = m_config.host; port = m_config.port; path = m_config.path; }
         std::string readyPath = path + "/ready";
 
+        // Small handshake payload so the backend knows which build is talking to
+        // it. Built here on the game thread and captured by value.
+        std::string readyJson = std::string(R"({"mod": "MikMarbleMod", "version": ")")
+                              + EscapeJsonString(kModVersion) + R"("})";
+
         auto state = m_state;
         state->inflight.fetch_add(1);
-        std::thread([state, host, port, readyPath]() noexcept {
-            try { HttpResult r = HttpPostJson(host, port, readyPath, "{}");
+        std::thread([state, host, port, readyPath, readyJson = std::move(readyJson)]() noexcept {
+            try { HttpResult r = HttpPostJson(host, port, readyPath, readyJson);
                   std::lock_guard<std::mutex> lock(state->mtx); state->pendingLogs.push_back(std::move(r)); }
             catch (...) {}
             state->inflight.fetch_sub(1);
@@ -1255,7 +1337,7 @@ public:
     MikMarbleMod() : CppUserModBase()
     {
         ModName        = STR("MikMarbleMod");
-        ModVersion     = STR("3.20");
+        ModVersion     = STR("3.21");
         ModDescription = STR("Mik marbles race result tracker (C++, event-driven)");
         ModAuthors     = STR("Draxi");
 
@@ -1267,7 +1349,7 @@ public:
             std::string host, path; int port = 0;
             { std::lock_guard<std::mutex> lock(self->m_configMutex); host = self->m_config.host; port = self->m_config.port; path = self->m_config.path; }
 
-            ImGui::Text("MikMarbleMod v3.20 (C++, event-driven)");
+            ImGui::Text("MikMarbleMod v%s (C++, event-driven)", kModVersion);
             ImGui::Text("Endpoint: %s:%d%s", host.c_str(), port, path.c_str());
             ImGui::Text("Hooks: %s", self->m_hooksRegistered ? "registered" : "waiting for HUD...");
             ImGui::Text("Respawn hook: %s", self->m_respawnHookRegistered ? "registered" : "waiting for royale...");
@@ -1313,7 +1395,23 @@ public:
     {
         std::wstring wHost(m_config.host.begin(), m_config.host.end());
         std::wstring wPath(m_config.path.begin(), m_config.path.end());
-        Output::send<LogLevel::Default>(STR("[MikMarble] Mod initialized (C++ v3.20) -> {}:{}{}\n"), wHost, m_config.port, wPath);
+        // Version comes from ModVersion so this line can't drift out of sync --
+        // it is the string the install instructions tell users to check for.
+        Output::send<LogLevel::Default>(STR("[MikMarble] Mod initialized (C++ v{}) -> {}:{}{}\n"),
+                                        ModVersion, wHost, m_config.port, wPath);
+        if (!m_config.ignoredNames.empty())
+        {
+            // Echo the loaded list so a misspelled or mis-cased entry is
+            // obvious without having to play a whole match to find out.
+            std::wstring names;
+            for (const auto& n : m_config.ignoredNames)
+            {
+                if (!names.empty()) names += L", ";
+                names += std::wstring(n.begin(), n.end());
+            }
+            Output::send<LogLevel::Default>(STR("[MikMarble] ignore list: {} name(s) loaded -> {}\n"),
+                                            m_config.ignoredNames.size(), names);
+        }
         m_unrealReady.store(true);
     }
 

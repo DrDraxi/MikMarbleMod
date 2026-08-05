@@ -23,4 +23,19 @@ echo === Registering MikMarbleMod in cppmods\CMakeLists.txt ===
 >>"%CPPMODS%" echo add_subdirectory^("${CMAKE_CURRENT_SOURCE_DIR}/../../src/MikMarbleMod" "MikMarbleMod"^)
 :registered
 
+:: The game runs on UE 5.8, which upstream UE4SS does not support. Our 5.8
+:: versioned container lives on a fork of the nested Unreal submodule, so the
+:: submodule init above has just reset it away. Put it back, otherwise the build
+:: succeeds but UE4SS aborts at runtime with "Engine version is not supported."
+echo === Restoring UE 5.8 support into the Unreal submodule ===
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%tools\restore-ue58-support.ps1"
+if errorlevel 1 (
+    echo.
+    echo === WARNING: UE 5.8 support was NOT restored. ===
+    echo === The build will still succeed, but the game will fail at startup with
+    echo ===   Fatal Error: Engine version is not supported.
+    echo === Fix it with: tools\restore-ue58-support.ps1
+    echo.
+)
+
 echo === Setup complete. Next: build.bat --deploy ===

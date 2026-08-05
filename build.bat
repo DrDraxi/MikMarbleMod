@@ -58,7 +58,28 @@ if %DO_DEPLOY%==0 (
 
 echo === Deploying to Marbles on Stream ===
 set "MARBLES_DIR=C:\Program Files (x86)\Steam\steamapps\common\Marbles on Stream\MarblesOnStream\Binaries\Win64"
-copy /Y "build\Game__Shipping__Win64\bin\UE4SS.dll"       "%MARBLES_DIR%\" >nul
+:: dwmapi.dll is the proxy loader and MUST sit next to the game exe.
 copy /Y "build\Game__Shipping__Win64\bin\dwmapi.dll"      "%MARBLES_DIR%\" >nul
+if errorlevel 1 goto :deployfail
+:: UE4SS.dll MUST go in the ue4ss\ subfolder - that is where the proxy loads it
+:: from (matching the layout in dist\ue4ss\UE4SS.dll). Copying it to the Win64
+:: root instead leaves a stale ue4ss\UE4SS.dll in place, and the game silently
+:: keeps running the OLD build while your rebuilds appear to do nothing.
+copy /Y "build\Game__Shipping__Win64\bin\UE4SS.dll"       "%MARBLES_DIR%\ue4ss\" >nul
+if errorlevel 1 goto :deployfail
 copy /Y "build\Game__Shipping__Win64\bin\MikMarbleMod.dll" "%MARBLES_DIR%\ue4ss\Mods\MikMarbleMod\dlls\main.dll" >nul
+if errorlevel 1 goto :deployfail
 echo === DONE ===
+exit /b 0
+
+:deployfail
+:: Without this check the copies fail silently while the build still reports
+:: success, so you go on testing (or shipping) a stale DLL. The usual cause is
+:: the game still running and holding the files open.
+echo.
+echo === DEPLOY FAILED: could not copy into the game folder. ===
+echo === Is Marbles on Stream still running? Close it and re-run. ===
+echo === (The build itself succeeded - output is in                ===
+echo ===  RE-UE4SS\build\Game__Shipping__Win64\bin\)               ===
+echo.
+exit /b 1

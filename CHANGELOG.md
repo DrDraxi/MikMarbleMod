@@ -2,6 +2,71 @@
 
 All notable changes to MikMarbleMod are documented here.
 
+## [3.21] - 2026-08-05
+
+Marbles on Stream moved to **Unreal Engine 5.8**
+(`++UE5+Release-5.8-CL-55116800`) and every UE4SS mod stopped loading. This
+release restores compatibility and adds a version handshake plus an optional
+ignore list. None of the breakage was in `dllmain.cpp` — it never got to run.
+
+### Fixed — UE 5.8 compatibility
+- **`FName::FName(wchar_t*)` no longer resolvable**, which aborted UE4SS's
+  pattern scan entirely (83 retries, then `PS scan timed out`). In 5.8 the
+  `EFindName` argument is materialised *inside* the constructor rather than at
+  the call site, so upstream's `41 B8 01 00 00 00` patterns match nothing —
+  5908 of its 5911 direct call sites never touch `r8`. Added
+  `UE4SS_Signatures/FName_Constructor.lua`, matching the constructor's own
+  prologue; the `0F B7 02` word load is what distinguishes it from the
+  byte-indexed ANSICHAR overload sitting 0xA0 earlier.
+- **No UE 5.8 versioned container existed** (upstream UE4SS stops at 5.7), so
+  it aborted with `Engine version is not supported.` Generated
+  `UnrealVirtual508` plus 62 vtable / member-layout tables with UVTD from a
+  monolithic Win64 Shipping PDB of engine tag `5.8.1-release` (matching the
+  game's changelist 55116800).
+- **`GUObjectArray` resolved to `FUObjectArray + 0x68`**, leaving UE4SS
+  spinning forever on `Waiting for object construction...` and burning a core.
+  5.8 moved `ObjObjects` from `0x10` to `0x0` (and grew `FUObjectArray` from
+  `0xC0` to `0xE8`), so patternsleuth's pre-5.8 correction misses. Added
+  `UE4SS_Signatures/GUObjectArray.lua`, which deliberately does *not* subtract
+  `0x10` the way the bundled example does.
+
+> Forcing `[EngineVersionOverride]` to 5.7 is **not** a workaround: it clears
+> the version check and then hangs on the same object-construction loop.
+
+### Added
+- **`/ready` now identifies the build.** The handshake body is
+  `{"mod": "MikMarbleMod", "version": "3.21"}` so a backend can tell which
+  version is reporting. Earlier builds sent `{}` — both fields should be
+  treated as optional. `server.py` logs it as `Ready: MikMarbleMod v3.21`.
+- **Optional `ignore` config** to leave players out of reported results:
+  `ignore=Name1,Name2` (comma-separated, key may be repeated). Matching is
+  exact but **case-insensitive** — the game reports the local player's name
+  lower-cased, so case-sensitive matching would silently never fire. Applies to
+  race, death race and bullseye; **not** to royale, where placement is derived
+  from elimination order. Off by default. The loaded list is echoed at startup
+  and removals are logged per match. If every player is filtered the payload is
+  `{"type": "...", "players": []}`.
+
+### Fixed — tooling / packaging
+- `build.bat --deploy` copied `UE4SS.dll` to the Win64 root instead of
+  `Win64\ue4ss\`, so the game silently kept loading a stale build while
+  rebuilds appeared to do nothing. It also reported success when the copy
+  failed because the game was running; it now fails loudly.
+- The version string was duplicated in three places with only one bumped, so
+  the mod could log a stale version — the log line now derives from
+  `ModVersion`.
+- `INSTALL.txt` in the bundle still said 3.17 and documented an outdated
+  payload (no `eliminations`, no `bullseye`). Rewritten with the full API.
+- Removed a stray `bash.exe.stackdump` that had shipped since 3.18.
+
+### Testing
+Verified against the game's own results export on UE 5.8 — race 200/200 exact,
+royale 100/100 exact including elimination counts, death race 192/200 (every
+mismatch a genuine tie: swapped marbles share identical elimination times to
+six decimals), bullseye winner/loser exact with mid-field approximate by nature
+(the game scores only the top three). Ignore list verified live in both
+directions, plus 21 unit tests over parsing, matching and edge cases.
+
 ## [3.20] - 2026-07-02
 
 Resurrection handling fixed against live-verified behavior. Forced-respawn
