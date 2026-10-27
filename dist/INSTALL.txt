@@ -1,10 +1,11 @@
-MikMarbleMod 3.21 — install
+MikMarbleMod 3.22 — install
 ===========================
 
 This bundle is a complete, ready-to-run UE4SS install with MikMarbleMod.
 
-Requires the UE 5.8 version of Marbles on Stream (Steam build 24556537 or
-later). See "Important" at the bottom.
+Requires the Season 73 version of Marbles on Stream (Steam build 26247165,
+October 2026, or later). Older game builds need MikMarbleMod 3.21. See
+"Important" at the bottom.
 
 1. Find your game's Win64 folder:
    <Steam>\steamapps\common\Marbles on Stream\MarblesOnStream\Binaries\Win64\
@@ -18,7 +19,7 @@ later). See "Important" at the bottom.
 
 4. Confirm it worked. In ue4ss\UE4SS.log you should see:
      Using engine version: 5.8
-     [MikMarble] Mod initialized (C++ v3.21) -> 127.0.0.1:5000/mod
+     [MikMarble] Mod initialized (C++ v3.22) -> 127.0.0.1:5000/mod
 
 
 HTTP API
@@ -27,7 +28,7 @@ Two endpoints, both POST, both relative to `path` from config.txt (default /mod)
 
 1) POST {path}/ready — one-shot handshake once the mod is live.
 
-   {"mod": "MikMarbleMod", "version": "3.21"}
+   {"mod": "MikMarbleMod", "version": "3.22"}
 
    Lets a backend know which build is talking to it. Versions before 3.21 sent
    an empty object {}, so treat both fields as optional.
@@ -103,10 +104,17 @@ Marbles on Stream runs on Unreal Engine 5.8, which upstream UE4SS does not
 support. This bundle therefore includes a patched build:
 
   ue4ss\UE4SS.dll
+  ue4ss\UE4SS-settings.ini          (engine version set to 5.8)
   ue4ss\UE4SS_Signatures\FName_Constructor.lua
   ue4ss\UE4SS_Signatures\GUObjectArray.lua
+  ue4ss\UE4SS_Signatures\GNatives.lua
+  ue4ss\UE4SS_Signatures\GUObjectHashTables.lua
 
 Do NOT replace these with a stock UE4SS release, and do not delete the
 UE4SS_Signatures folder — without them UE4SS fails to start and no mod loads
-at all (the log will show "PS scan timed out", "Engine version is not
-supported", or it will hang on "Waiting for object construction...").
+at all (the log will show "PS scan timed out" after repeated "Scan failed",
+"Engine version is not supported", or it will hang on "Waiting for object
+construction...").
+
+If you are upgrading from 3.21, copy the whole bundle again: the new files
+are in ue4ss\UE4SS_Signatures\ and ue4ss\UE4SS-settings.ini, not only the DLL.

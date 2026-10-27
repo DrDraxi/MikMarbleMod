@@ -107,7 +107,8 @@ def click_when(image_name, timeout=120, confidence=None, label=None):
     print(f"[click] {label} at {loc}", flush=True)
     time.sleep(POST_CLICK_DELAY)
     dbg_shot(f"after_click_{label.replace(' ','_')}")
-    return True
+    return loc   # truthy, so `if not click_when(...)` still works; callers that
+                 # need to position siblings relative to the button can use it
 
 def wait_for(image_name, timeout=600, confidence=DEFAULT_CONF, label=None):
     label = label or image_name
@@ -187,16 +188,24 @@ def run_one_race(map_image, bot_count=None, pause_results=False):
     print(f"\n=== Starting race on {map_image}" + (f" with {bot_count} bots" if bot_count else "") + " ===", flush=True)
     if not click_when(map_image, timeout=20, label=f"map ({map_image})"):
         return False
-    if not click_when("step4.png", timeout=15, label="Bots"):
+    bots_loc = click_when("step4.png", timeout=15, label="Bots")
+    if not bots_loc:
         return False
-    # Optionally set bot count: double-click the racer-count input field at
-    # (2100, 1100), select-all, then type the desired number.
+    # Optionally set bot count: double-click the "Max Marbles" input field,
+    # select-all, then paste the desired number.
     if bot_count is not None:
         time.sleep(0.5)
-        # "Max Racers" input pill — native (2105, 895), same row as the Bots button.
-        # (Previously clicked (2100,1100) which is ~205px too low = grass, so the
-        #  paste never landed and the race ran with the field's default.)
-        pyautogui.doubleClick(2105, 895)
+        # The "Max Marbles" input pill sits on the SAME ROW as the Bots button,
+        # ~248px to its right. Derive it from the located Bots button rather than
+        # hardcoding screen coords: the Aug-2026 game update moved this whole row
+        # down ~206px (the old hardcoded (2105, 895) landed on the Local Stats
+        # text). A stale coord here is not merely cosmetic — with no text field
+        # focused, the Ctrl+A / Ctrl+V leak into the game and the following PLAY!
+        # click gets swallowed, so the race never starts at all.
+        field_x, field_y = bots_loc.x + 248, bots_loc.y
+        print(f"[type ] max-marbles field at ({field_x}, {field_y}) "
+              f"(Bots at {bots_loc.x},{bots_loc.y})", flush=True)
+        pyautogui.doubleClick(field_x, field_y)
         time.sleep(0.3)
         # Select-all FIRST so the paste REPLACES any existing value (the field may
         # default to 20/50; double-click alone may not select the whole number, so
@@ -232,7 +241,8 @@ def run_one_race(map_image, bot_count=None, pause_results=False):
         # Debug: capture the count field so we can confirm what value actually stuck.
         try:
             ts0 = int(time.time())
-            pyautogui.screenshot().crop((1950, 865, 2320, 985)).save(
+            pyautogui.screenshot().crop(
+                (field_x - 155, field_y - 60, field_x + 215, field_y + 60)).save(
                 str(DEBUG_DIR / f"botcount_{ts0}.png"))
             print(f"[type ] saved botcount field crop botcount_{ts0}.png", flush=True)
         except Exception as e:

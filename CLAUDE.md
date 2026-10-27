@@ -21,7 +21,7 @@ scraping the result UI. At a high level:
    `path`. If the file is missing it is auto-created with defaults (`path=/mod`).
 2. Once Unreal is initialized it fires a one-shot `POST {path}/ready` so the
    server knows the mod is live. The body identifies the build:
-   `{"mod": "MikMarbleMod", "version": "3.21"}`. Builds before 3.21 sent `{}`,
+   `{"mod": "MikMarbleMod", "version": "3.22"}`. Builds before 3.21 sent `{}`,
    so treat both fields as optional if you need to support older mods.
 3. When a match's HUD appears it registers post-hooks (via `UFunction::RegisterPostHook`)
    on three native `AMarbleRaceHUDY2` events (the royale HUD derives from it, so
@@ -143,6 +143,24 @@ at all:
    patternsleuth's stale correction lands on base + 0x68. Fixed by
    `dist/ue4ss/UE4SS_Signatures/GUObjectArray.lua`, which deliberately does *not*
    subtract `0x10` the way the bundled `.example` does.
+
+4. **A same-version patch release breaks more patternsleuth resolvers** → `Scan
+   failed` on repeat. The Oct-2026 update (still 5.8, but
+   `CL-55116800` → `CL-58210709`) broke three at once:
+   - `EngineVersion` → set `MajorVersion = 5` / `MinorVersion = 8` under
+     `[EngineVersionOverride]` in `UE4SS-settings.ini`. Stating the binary's *true*
+     version is safe; the warning in failure class 2 is about claiming a different one.
+   - `GNatives` → `dist/ue4ss/UE4SS_Signatures/GNatives.lua` matches the static
+     `GRegisterNative` stub for opcode 0. The table was found in live memory of the
+     unmodded game (rename `dwmapi.dll` so UE4SS doesn't load) and cross-checked
+     against the VM's inlined `FFrame::Step` dispatch. GNatives must be correct:
+     UE4SS's UFunction hook path uses it.
+   - `FUObjectHashTables::Get()` → `GUObjectHashTables.lua` is a **placeholder**.
+     UE4SS v3.0.1 never reads this result (see the file header), so the override only
+     removes it from the scan.
+
+   The shipping build strips log strings, so string-anchored searches don't work.
+   Find the data at runtime first, then build an AOB from the code that references it.
 
 ### Regenerating the versioned container for a new UE version
 
@@ -369,7 +387,7 @@ python server/server.py            # listens on 0.0.0.0:5000
 Endpoints:
 
 - `POST /mod/ready`   → `200` handshake. Logs the reporting build, e.g.
-  `Ready: MikMarbleMod v3.21`, and echoes the version back in the response.
+  `Ready: MikMarbleMod v3.22`, and echoes the version back in the response.
 - `POST /mod/results` → validates the payload and prints the standings, the
   winner, and (for royales) the loser; echoes the parsed result back as JSON.
 
@@ -419,6 +437,10 @@ CLI: `bot_test.py [N_RACES] [MAP[:BOTS] ...] [--flags]`
 - `MAP` — `step3.png` (random, default) · `step3_target_race.png` ·
   `step3_death_race.png` · `step3_battle_stadium.png` (royale). Append `:NN` to
   set the bot count, e.g. `step3_battle_stadium.png:100`.
+- Bullseye (`step3_target_race.png` = the Buckshot card): since Season 73 Buckshot
+  is not among the first rows of the Race list. Click **Map Name** to sort, so it
+  lands near the top, then run with `--skip-menu`. Random can also land on unlisted
+  maps (it picked Death Alley and Multilane Madness).
 - Flags: `--royale` (enter Royale mode) · `--skip-launch` (game already running) ·
   `--skip-menu` (already past the menu) · `--pause-results` (stop on the results
   table for manual inspection).
@@ -432,18 +454,17 @@ sensitive — if matches start missing, recapture them on your display.
 
 ## Versioning / packaging
 
-The version is written in **three** places in `dllmain.cpp` and they are *not*
-derived from each other — update all three or the mod will report a stale
-version (the log line is the one the install instructions tell users to check):
+The version is written in **two** places in `dllmain.cpp`. Update both. The log
+line, the debug panel and the `/ready` body all derive from them:
 
 | line | what |
 |---|---|
-| ~1258 | `ModVersion = STR("3.21");` |
-| ~1270 | `ImGui::Text("MikMarbleMod v3.21 …")` — debug panel |
-| ~1316 | `[MikMarble] Mod initialized (C++ v3.21)` — the log line users verify |
+| ~85 | `kModVersion = "3.22";`: narrow copy for the JSON handshake and ImGui |
+| ~1340 | `ModVersion = STR("3.22");`: the log line users verify |
 
-`ModVersion` is set in `dllmain.cpp` (currently `3.21`). To cut a release, build,
-then refresh `dist/ue4ss/Mods/MikMarbleMod/dlls/main.dll` with the new
-`MikMarbleMod.dll` and zip the `dist/` contents. The bundle does **not** ship a
+Also bump the version in `dist/INSTALL.txt`. To cut a release, build, then
+refresh `dist/ue4ss/Mods/MikMarbleMod/dlls/main.dll` with the new
+`MikMarbleMod.dll`, zip the `dist/` contents as `MikMarbleMod_vX.YY.zip`
+(gitignored) and attach it to a GitHub release tagged `vX.YY`. The bundle does **not** ship a
 `config.txt` — the mod auto-creates it (with `path=/mod`) next to the DLL on first
 launch, so a fresh install works against the dummy server out of the box.

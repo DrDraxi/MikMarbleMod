@@ -2,6 +2,48 @@
 
 All notable changes to MikMarbleMod are documented here.
 
+## [3.22] - 2026-10-27
+
+The Season 73 game update (Steam build 26247165) is still on Unreal Engine 5.8,
+but it is a newer engine build (`CL-55116800` → `CL-58210709`), and every UE4SS
+mod stopped loading again. UE4SS's startup scan failed to find three engine
+lookups, retried with `Scan failed` until `PS scan timed out`, and never started
+any mod. As in 3.21, nothing was wrong in `dllmain.cpp`. The mod code is
+unchanged apart from the version number.
+
+### Fixed — Season 73 / CL-58210709 compatibility
+- **`EngineVersion` no longer detected** (`Failed to find EngineVersion`): none
+  of patternsleuth's patterns match this build. `UE4SS-settings.ini` now sets
+  `[EngineVersionOverride]` to 5.8. That is the binary's real version, so it is
+  safe; the 3.21 warning is only about claiming a different one.
+- **`GNatives` not found.** Both patternsleuth routes, the inlined
+  `GRegisterNative` init and the `UObject::SkipFunction` prologue, stopped
+  matching. Added `UE4SS_Signatures/GNatives.lua`, which matches the static
+  registration stub for opcode 0 (`EX_LocalVariable`). The table was located
+  in live memory of the unmodded game and confirmed against the VM's inlined
+  `FFrame::Step` dispatch; all 91 registration stubs agree on its address.
+  GNatives must be correct: UE4SS's UFunction hook path uses it.
+- **`FUObjectHashTables::Get()` not found.** UE4SS v3.0.1 never reads this
+  result, so `UE4SS_Signatures/GUObjectHashTables.lua` is a labelled
+  placeholder that only takes the resolver out of the scan (see its header).
+
+### Tests
+- `tests/screenshots`: recaptured the Race and Royale mode cards (the mode
+  select screen was redesigned) and the Buckshot map card. Buckshot is now
+  reached by sorting the Race list by **Map Name**.
+- `bot_test.py`: the Max Marbles field is located relative to the Bots button
+  instead of hardcoded coordinates (the August update moved that row).
+
+### Verified
+Against the game's own results export on build 26247165: race 20/20 exact,
+death race 20/20 exact, royale 100/100 exact (99 kills credited for 99
+eliminations), royale with 3 forced resurrections 50/50 exact (the first
+marble out was resurrected and placed 3rd), bullseye 48/50 (winner, podium,
+loser and the 3 off-map marbles exact; one swap among 0-point places). Also
+verified: `config.txt` auto-create, the ignore list (case-insensitive, not
+applied to royale), the WinHTTP error path with the server down, and the
+ImGui panel's test buttons.
+
 ## [3.21] - 2026-08-05
 
 Marbles on Stream moved to **Unreal Engine 5.8**

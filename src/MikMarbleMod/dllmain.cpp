@@ -82,7 +82,7 @@ static constexpr const char* kDefaultPath = "/mod";
 // want char, while ModVersion must be a wide STR() literal). Keep in sync with
 // the ModVersion assignment in the constructor -- the log line derives from
 // ModVersion, so those two are the only places a version string is written.
-static constexpr const char* kModVersion = "3.21";
+static constexpr const char* kModVersion = "3.22";
 
 struct ModConfig
 {
@@ -1337,7 +1337,7 @@ public:
     MikMarbleMod() : CppUserModBase()
     {
         ModName        = STR("MikMarbleMod");
-        ModVersion     = STR("3.21");
+        ModVersion     = STR("3.22");
         ModDescription = STR("Mik marbles race result tracker (C++, event-driven)");
         ModAuthors     = STR("Draxi");
 
