@@ -1,4 +1,4 @@
-MikMarbleMod 3.23 — install
+MikMarbleMod 3.24 — install
 ===========================
 
 This bundle is a complete, ready-to-run UE4SS install with MikMarbleMod.
@@ -19,7 +19,7 @@ October 2026, or later). Older game builds need MikMarbleMod 3.21. See
 
 4. Confirm it worked. In ue4ss\UE4SS.log you should see:
      Using engine version: 5.8
-     [MikMarble] Mod initialized (C++ v3.23) -> 127.0.0.1:5000/mod
+     [MikMarble] Mod initialized (C++ v3.24) -> 127.0.0.1:5000/mod
      [MikMarble] target: default = 127.0.0.1:5000/mod (results on; events: none)
 
 
@@ -32,7 +32,7 @@ target that is `path` from config.txt, default /mod). Out of the box only
 
 1) POST {path}/ready — one-shot handshake once the mod is live.
 
-   {"mod": "MikMarbleMod", "version": "3.23", "results": true, "events": []}
+   {"mod": "MikMarbleMod", "version": "3.24", "results": true, "events": []}
 
    Lets a backend know which build is talking to it and what this target will
    receive. Versions before 3.23 sent only mod + version, and before 3.21 an
@@ -147,6 +147,10 @@ which ids get each feature. Live events are OFF unless listed:
   marble_eliminated=overlay
   countdown=overlay
   all_events=bot                 # shortcut: every live event to these ids
+
+A target URL may end in a query string (3.24+), e.g. a server token:
+  target.lamp=http://127.0.0.1:8420/mod?token=abc
+It is added to every request (/mod/event?token=abc) and masked in the log.
 
 Feature keys: results, map_entered, player_joined, marble_finished,
 marble_eliminated, marble_resurrected, marble_damaged, countdown,

@@ -452,8 +452,8 @@ ignore=AnotherName
 ### Targets and feature routing (3.23+)
 
 `host`/`port`/`path` define the target with id **`default`**. More targets get
-an id with `target.<id>=<url>` (`http://` or `https://`, optional port and base
-path). Then each feature is routed to target ids:
+an id with `target.<id>=<url>` (`http://` or `https://`, optional port, base
+path and — 3.24+ — a `?query` that is appended to every request, e.g. a token). Then each feature is routed to target ids:
 
 ```ini
 target.overlay=http://192.168.1.20:8080/marbles
@@ -623,8 +623,8 @@ line, the debug panel and the `/ready` body all derive from them:
 
 | line | what |
 |---|---|
-| ~103 | `kModVersion = "3.23";`: narrow copy for the JSON handshake and ImGui |
-| ~2450 | `ModVersion = STR("3.23");`: the log line users verify |
+| ~104 | `kModVersion = "3.24";`: narrow copy for the JSON handshake and ImGui |
+| ~2698 | `ModVersion = STR("3.24");`: the log line users verify |
 
 Also bump the version in `dist/INSTALL.txt`. To cut a release, build, then
 refresh `dist/ue4ss/Mods/MikMarbleMod/dlls/main.dll` with the new

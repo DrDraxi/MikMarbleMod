@@ -2,6 +2,16 @@
 
 All notable changes to MikMarbleMod are documented here.
 
+## [3.24] - 2026-11-06
+
+### Added
+- **Query strings on target URLs**, e.g. a server token:
+  `target.lamp=http://127.0.0.1:8420/mod?token=abc`. The query goes on every
+  request (`/mod/ready?token=abc`, `/mod/event?token=abc`, ...). Before this it
+  was glued into the path (`/mod?token=abc/event`). The legacy `path=` key
+  accepts one too. Query values are masked in `UE4SS.log`
+  (`?token=***`).
+
 ## [3.23] - 2026-11-06
 
 Live gameplay events and multiple targets. **An untouched config behaves exactly

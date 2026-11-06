@@ -101,7 +101,7 @@ static constexpr const char* kDefaultPath = "/mod";
 // want char, while ModVersion must be a wide STR() literal). Keep in sync with
 // the ModVersion assignment in the constructor -- the log line derives from
 // ModVersion, so those two are the only places a version string is written.
-static constexpr const char* kModVersion = "3.23";
+static constexpr const char* kModVersion = "3.24";
 
 // Every live event the mod can emit. Each is OFF unless the config routes it
 // to at least one target (`<event>=<ids>` or `all_events=<ids>`).
@@ -123,6 +123,7 @@ struct Target
     std::string host;
     int         port = 0;
     std::string basePath;       // no trailing slash ("" = server root)
+    std::string query;          // "" or "?token=..." -- appended after /ready, /results, /event
     bool        sendResults = false;
     std::set<std::string> events;   // routed live events
 };
@@ -217,6 +218,37 @@ static std::vector<std::string> ParseRoute(const std::string& val)
     return ids;
 }
 
+// Split "<path>?<query>" into the path and "?<query>" (empty when there is
+// none). The query rides along on every request, e.g. a server token.
+static std::string SplitQuery(std::string& p)
+{
+    size_t q = p.find('?');
+    if (q == std::string::npos) return {};
+    std::string query = Trim(p.substr(q));
+    p = p.substr(0, q);
+    return query.size() > 1 ? query : std::string();
+}
+
+// The query for logs and the debug panel: keys stay, values are masked, so a
+// shared UE4SS.log doesn't leak a token.
+static std::string MaskQuery(const std::string& query)
+{
+    if (query.empty()) return {};
+    std::string out;
+    size_t pos = 1;
+    while (pos <= query.size())
+    {
+        size_t amp = query.find('&', pos);
+        std::string part = query.substr(pos, amp == std::string::npos ? std::string::npos : amp - pos);
+        size_t eq = part.find('=');
+        out += out.empty() ? "?" : "&";
+        out += eq == std::string::npos ? part : part.substr(0, eq) + "=***";
+        if (amp == std::string::npos) break;
+        pos = amp + 1;
+    }
+    return out;
+}
+
 static std::string NormalizeBasePath(std::string p)
 {
     p = Trim(p);
@@ -225,13 +257,15 @@ static std::string NormalizeBasePath(std::string p)
     return p;
 }
 
-// <url> = [http://|https://]host[:port][/base/path]
+// <url> = [http://|https://]host[:port][/base/path][?query]
 static bool ParseTargetUrl(const std::string& urlIn, Target& t, std::vector<std::string>& warnings)
 {
     std::string url = Trim(urlIn);
     if (url.empty()) { warnings.push_back("target." + t.id + " has no URL"); return false; }
 
     std::string rest = url;
+    t.query = SplitQuery(rest);
+    url = rest;   // keep the token out of the warnings below
     std::string lower = AsciiLower(url);
     if (lower.rfind("https://", 0) == 0) { t.https = true; rest = url.substr(8); }
     else if (lower.rfind("http://", 0) == 0) { rest = url.substr(7); }
@@ -249,7 +283,8 @@ static bool ParseTargetUrl(const std::string& urlIn, Target& t, std::vector<std:
     }
     t.host = hostport;
     if (t.host.empty()) { warnings.push_back("no host in target." + t.id + " '" + url + "'"); return false; }
-    t.label = std::string(t.https ? "https://" : "") + t.host + ":" + std::to_string(t.port) + t.basePath;
+    t.label = std::string(t.https ? "https://" : "") + t.host + ":" + std::to_string(t.port) + t.basePath
+            + MaskQuery(t.query);
     return true;
 }
 
@@ -265,8 +300,10 @@ static std::vector<Target> BuildTargets(const ModConfig& cfg, std::vector<std::s
         t.id = kLegacyTargetId;
         t.host = Trim(cfg.host);
         t.port = cfg.port;
-        t.basePath = NormalizeBasePath(cfg.path);
-        t.label = t.host + ":" + std::to_string(t.port) + t.basePath;
+        std::string path = cfg.path;
+        t.query = SplitQuery(path);
+        t.basePath = NormalizeBasePath(path);
+        t.label = t.host + ":" + std::to_string(t.port) + t.basePath + MaskQuery(t.query);
         all.push_back(std::move(t));
     }
     for (const auto& [id, url] : cfg.namedTargets)
@@ -1048,7 +1085,7 @@ namespace mik
         {
             if (!TargetWants(s->target, name)) continue;
             OutJob job;
-            job.path = s->target.basePath + "/event";
+            job.path = s->target.basePath + "/event" + s->target.query;
             job.body = body;
             job.lowPriority = lowPriority;
             s->Enqueue(std::move(job));
@@ -2486,7 +2523,7 @@ class MikMarbleMod : public RC::CppUserModBase
         {
             if (!s->target.sendResults) continue;
             OutJob job;
-            job.path = s->target.basePath + "/results";
+            job.path = s->target.basePath + "/results" + s->target.query;
             job.body = json;
             job.logSuccess = true;
             s->Enqueue(std::move(job));
@@ -2515,7 +2552,7 @@ class MikMarbleMod : public RC::CppUserModBase
                 events += JStr(std::string(e));
             }
             OutJob job;
-            job.path = s->target.basePath + "/ready";
+            job.path = s->target.basePath + "/ready" + s->target.query;
             job.body = std::string(R"({"mod": "MikMarbleMod", "version": ")") + EscapeJsonString(kModVersion) +
                        R"(", "results": )" + (s->target.sendResults ? "true" : "false") +
                        R"(, "events": [)" + events + "]}";
@@ -2658,7 +2695,7 @@ public:
     MikMarbleMod() : CppUserModBase()
     {
         ModName        = STR("MikMarbleMod");
-        ModVersion     = STR("3.23");
+        ModVersion     = STR("3.24");
         ModDescription = STR("Mik marbles race result tracker + live events (C++, event-driven)");
         ModAuthors     = STR("Draxi");
 
@@ -2836,7 +2873,10 @@ public:
     auto on_unreal_init() -> void override
     {
         std::wstring wHost(m_config.host.begin(), m_config.host.end());
-        std::wstring wPath(m_config.path.begin(), m_config.path.end());
+        std::string path = m_config.path;
+        std::string query = MaskQuery(SplitQuery(path));
+        path = NormalizeBasePath(path) + query;
+        std::wstring wPath(path.begin(), path.end());
         // Version comes from ModVersion so this line can't drift out of sync --
         // it is the string the install instructions tell users to check for.
         Output::send<LogLevel::Default>(STR("[MikMarble] Mod initialized (C++ v{}) -> {}:{}{}\n"),
