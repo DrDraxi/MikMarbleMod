@@ -1,8 +1,11 @@
 # MikMarbleMod
 
 A UE4SS C++ mod for **Marbles on Stream** that reads the final race/royale
-standings and POSTs them as JSON to an HTTP endpoint. Ships with a Flask dummy
-results server and an autonomous bot test runner.
+standings and POSTs them as JSON to an HTTP endpoint. Since 3.23 it can also
+stream live events (chat joins with the command used, countdown ticks, damage,
+finishes, eliminations, Grand Prix standings…) to several named targets, each
+feature routed separately in `config.txt`. All of that is off by default.
+Ships with a Flask dummy results/events server and an autonomous bot test runner.
 
 ## Quick start
 
@@ -20,7 +23,7 @@ build.bat --deploy   :: build the DLL and copy it into the game
 
 ```bash
 pip install -r server/requirements.txt
-python server/server.py        :: prints standings POSTed by the mod on :5000
+python server/server.py        :: prints standings + events POSTed by the mod on :5000
 ```
 
 Full details — how the mod works, dependencies, the `config.txt` gotcha, and the

@@ -1,4 +1,4 @@
-MikMarbleMod 3.22 — install
+MikMarbleMod 3.23 — install
 ===========================
 
 This bundle is a complete, ready-to-run UE4SS install with MikMarbleMod.
@@ -19,19 +19,24 @@ October 2026, or later). Older game builds need MikMarbleMod 3.21. See
 
 4. Confirm it worked. In ue4ss\UE4SS.log you should see:
      Using engine version: 5.8
-     [MikMarble] Mod initialized (C++ v3.22) -> 127.0.0.1:5000/mod
+     [MikMarble] Mod initialized (C++ v3.23) -> 127.0.0.1:5000/mod
+     [MikMarble] target: default = 127.0.0.1:5000/mod (results on; events: none)
 
 
 HTTP API
 --------
-Two endpoints, both POST, both relative to `path` from config.txt (default /mod).
+Three endpoints, all POST, relative to each target's URL (for the default
+target that is `path` from config.txt, default /mod). Out of the box only
+/ready and /results are used, exactly as in 3.22; /event needs opting in
+(see config.txt below).
 
 1) POST {path}/ready — one-shot handshake once the mod is live.
 
-   {"mod": "MikMarbleMod", "version": "3.22"}
+   {"mod": "MikMarbleMod", "version": "3.23", "results": true, "events": []}
 
-   Lets a backend know which build is talking to it. Versions before 3.21 sent
-   an empty object {}, so treat both fields as optional.
+   Lets a backend know which build is talking to it and what this target will
+   receive. Versions before 3.23 sent only mod + version, and before 3.21 an
+   empty object {}, so treat every field as optional.
 
 2) POST {path}/results — sent once per match, when the results are final.
 
@@ -67,6 +72,42 @@ Two endpoints, both POST, both relative to `path` from config.txt (default /mod)
    The list can legitimately be EMPTY (e.g. every player is on the ignore list
    below), so handle that rather than assuming at least one entry.
 
+3) POST {path}/event — live gameplay events (3.23+, only the ones you route).
+
+   One flat JSON object per event. Every event has:
+     event      the event name
+     ts         Unix time in milliseconds
+     match_id   the game's match GUID for this map (or null)
+     map        map display name, e.g. "Battle Stadium"
+     mode       "race", "royale", "bullseye", "laps", "tilted",
+                "grand_prix_results" or "other"
+   Player events also have "name" (same as in /results) and "display_name".
+
+   map_entered          level, experience, grand_prix (bool)
+   player_joined        command (the chat text, e.g. "!play 7", or null for
+                        bots), via_chat (bool)
+   countdown            phase ("start" = pre-race countdown, "race_end" =
+                        force-race-end timer), seconds_left — once per second
+   marble_damaged       damage (float), health (after the hit), health_before,
+                        max_health, attacker (or null)
+   marble_finished      position (1 = first), winner (bool)
+   marble_eliminated    killer (or null for falls/zones), elimination_order
+   marble_resurrected   (royale) an eliminated marble came back; detected_by
+                        "respawn_hook" or "damage". A later death sends a
+                        new marble_eliminated.
+   grand_prix_finished  races, standings: [{position, name, display_name,
+                        points, wins, eliminations, damage}, ...]
+
+   Example:
+   {"event": "player_joined", "ts": 1793980552202, "match_id": "7487a7ee-...",
+    "map": "Marble Diner", "mode": "race", "name": "drdraxi",
+    "display_name": "DrDraxi", "command": "!play 7", "via_chat": true}
+
+   Events reach each target in the order they happened, and /results always
+   arrives after that match's last finish/elimination event. A royale sends a
+   lot of marble_damaged (hundreds per 30 marbles), so only route it where
+   it's wanted.
+
 
 config.txt
 ----------
@@ -77,7 +118,7 @@ with these defaults (which match the bundled dummy server, server/server.py):
 
   host=127.0.0.1
   port=5000
-  path=/mod        # POSTs to /mod/ready and /mod/results
+  path=/mod        # target "default": POSTs to /mod/ready and /mod/results
 
   # Optional: players to leave out of reported results.
   # Comma-separated; the key may be repeated to add more.
@@ -94,6 +135,25 @@ removed, so a typo is easy to spot:
 
   [MikMarble] ignore list: 2 name(s) loaded -> somename, anothername
   [MikMarble] ignore list: omitted 1 player(s) from results
+
+Targets and live events (3.23+). Give each extra endpoint an id, then list
+which ids get each feature. Live events are OFF unless listed:
+
+  target.overlay=http://192.168.1.20:8080/marbles
+  target.bot=https://example.com/hooks
+
+  results=default                # the default when omitted; "none" = off
+  player_joined=overlay,bot
+  marble_eliminated=overlay
+  countdown=overlay
+  all_events=bot                 # shortcut: every live event to these ids
+
+Feature keys: results, map_entered, player_joined, marble_finished,
+marble_eliminated, marble_resurrected, marble_damaged, countdown,
+grand_prix_finished, all_events.
+The log shows the resolved routing at startup, plus a "[MikMarble] config:"
+warning for an unknown id or a bad URL. `ignore` only affects /results, never
+live events.
 
 To use your own backend, edit config.txt after the first launch and restart.
 

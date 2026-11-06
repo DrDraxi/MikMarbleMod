@@ -2,6 +2,78 @@
 
 All notable changes to MikMarbleMod are documented here.
 
+## [3.23] - 2026-11-06
+
+Live gameplay events and multiple targets. **An untouched config behaves exactly
+like 3.22**: ready + results to host/port/path, nothing else. Everything new is
+opt-in through config.txt.
+
+### Added
+- **Named targets + per-feature routing.** `target.<id>=<url>` adds an endpoint
+  (http or https, optional port and base path); host/port/path is target
+  `default`. Each feature is routed with `<feature>=<id>,<id>`, and
+  `all_events=<ids>` is a shortcut. `results` defaults to `default`. Live events
+  default to off. The resolved routing and any config mistakes (unknown id,
+  duplicate id, bad URL) are logged at startup.
+- **Live events**, POSTed to `<target>/event`, each with `event`, `ts`,
+  `match_id`, `map`, `mode`:
+  - `map_entered`: map display name, level, experience asset, grand-prix flag.
+  - `player_joined`: viewer name + the exact chat command (`"!play 7"`); bots
+    are reported with `via_chat: false`.
+  - `countdown`: one tick per second, `phase` `start` (pre-race) or
+    `race_end` (force-race-end timer).
+  - `marble_damaged`: damage, health after/before, max health, attacker.
+  - `marble_finished`: finish position + winner flag.
+  - `marble_eliminated`: killer + elimination order.
+  - `grand_prix_finished`: full final standings (points, wins, eliminations,
+    damage) and race count.
+  - `marble_resurrected`: a royale marble came back from elimination, from the
+    respawn hook or, as a backup, from its new pawn taking damage.
+- `/ready` now also says what the target will receive: `"results": bool,
+  "events": [...]` (additive; older fields unchanged).
+- Per-target sender threads with ordered queues and connection keep-alive;
+  ready/results now go through the same queue (no more "one POST at a time,
+  drop if busy"), so results always land after that match's last event.
+- `trace_functions=1`: discovery logging of every UFunction going through
+  ProcessEvent, for finding renamed events after a game update.
+- ImGui panel: per-target stats, per-event counts, recent event bodies, and a
+  **Test Events** button.
+- Dummy server: `/event` endpoint with readable output, `--port`, `--base`,
+  `--log` (JSONL), `--quiet`; no debug reloader.
+
+### Fixed
+- **Respawn hooks read the new pawn from the wrong place.** The return value
+  was read from the param block, which UE4SS leaves uninitialised for
+  Blueprint-originated calls (stack garbage). It now comes from the call's
+  return slot; resurrections had only worked through the PlayerState fallback.
+
+### Robustness (from a crash/leak review, all re-tested live)
+- The DLL is pinned so detached sender threads, hooks and the ProcessEvent
+  callback can never run unmapped code at game exit or on hot reload; hooks
+  are never registered twice.
+- SEH guards catch only access violations / page faults / C++ exceptions, not
+  stack overflows or anything else.
+- Type-checked struct/array params (`CastField`), a size check before every
+  hand-built ProcessEvent call, no guessed param offsets.
+- Match end latches before building standings (a fault can't retry every tick).
+- Bounded growth: chat-command map capped and pruned; senders drop their queue
+  on stop; ImGui tab removed before the instance's members are destroyed.
+
+### Verified (Season 73, build 26247165)
+Live, against two dummy servers with different routing: 30-bot royales
+(30 joins, 437 damage hits with attacker and health, every elimination with
+killer, results), a race with a real Twitch viewer joining with `!play 7`
+(join with command, start countdown 10→0, finish #1 winner), and a 2-race
+20-bot Grand Prix (17 finishes in the game's exact order, race_end countdown,
+`grand_prix_finished` with all 40 standings matching the in-game table). The
+target that wasn't routed damage or results received neither. Resurrections:
+two forced mid-royale (100 marbles) → exactly two `marble_resurrected`, both
+placed correctly (first out → revived → 9th), no false positives from the
+backup detector. Stress: three targets (live, black-holed, refused) through a
+100-marble royale, memory/threads/handles flat, the live target got
+everything; normal game exit with a request still hanging: clean, no crash
+report. An untouched config sends only ready + results.
+
 ## [3.22] - 2026-10-27
 
 The Season 73 game update (Steam build 26247165) is still on Unreal Engine 5.8,

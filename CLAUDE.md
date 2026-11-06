@@ -4,6 +4,10 @@ A [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) C++ mod for **Marbles on Stream*
 (Steam AppID `1170970`). It reads the final standings at the end of each race,
 royale, or target race (Bullseye) and **POSTs the results as JSON** to an HTTP
 endpoint, so an external service can react to **who won and who lost**.
+Since 3.23 it can also stream **live events** (map entered, chat joins,
+countdown ticks, damage, finishes, eliminations, Grand Prix final standings) to
+any number of named targets, each feature routed separately (see "Live events").
+An untouched config still only sends the legacy ready + results.
 
 A small Flask **dummy results server** and an **autonomous bot test runner** are
 bundled so the whole loop (play a race → mod reads standings → POST → server
@@ -13,7 +17,7 @@ prints them) can be exercised without writing any backend.
 
 ## How it works
 
-The mod is a single translation unit, `src/MikMarbleMod/dllmain.cpp` (~700 lines).
+The mod is a single translation unit, `src/MikMarbleMod/dllmain.cpp` (~2500 lines).
 It is **event-driven** — it hooks the game's own gameplay UFunctions rather than
 scraping the result UI. At a high level:
 
@@ -108,8 +112,115 @@ can't stall the game.
 > alive, only the winner and the eliminated players are reported (the alive
 > middle-rank players have no event-derived ranking).
 
-The mod also draws a small ImGui debug panel inside UE4SS showing the endpoint,
-whether the hooks are registered, and the last standings sent.
+The mod also draws a small ImGui debug panel inside UE4SS showing each target
+(sent / failed / dropped / queued counts), whether the hooks are registered,
+per-event counts with the last few event bodies, and the last standings sent.
+Its **Test Events** button emits one of each live event with fake data
+(`"test": true`), for wiring up a backend without playing a match.
+
+---
+
+## Live events (3.23+)
+
+On top of the legacy `ready` / `results` pair, the mod can POST individual
+gameplay events as they happen. **Every live event is off unless config.txt
+routes it to a target** (see "config.txt" below), so an untouched config behaves
+exactly like 3.22.
+
+Each event is a single `POST <target>/event` with a flat JSON object. Envelope
+fields, present on every event:
+
+| field | meaning |
+|---|---|
+| `event` | the event name (below) |
+| `ts` | Unix time in milliseconds when the mod saw it |
+| `match_id` | the game's `MatchID` GUID for this map, or `null`. The game assigns it shortly after the map loads, so `map_entered` usually has `null` and later events have the GUID; lobbies filled with the Bots button never get one |
+| `map` | map display name (e.g. `"Battle Stadium"`), or the level name if the map has none |
+| `mode` | `race`, `royale`, `bullseye`, `laps`, `tilted`, `grand_prix_results`, or `other` |
+
+Per-player events carry `name` (username — the same string `results` uses) and
+`display_name`.
+
+| event | extra fields | fires when | source (verified live) |
+|---|---|---|---|
+| `map_entered` | `level`, `experience`, `grand_prix` | a new map's lobby is up (once per map) | GameState identity change + `AMOSGameMode.MyMapDisplayName` / `MatchID` / `bGrandPrixMode` |
+| `player_joined` | `command`, `via_chat` | a viewer joins (and once per bot) | `ULiveStreamChatProcessor::OnChatMessageReceived` on the `ViewerJoinGameCommandProcessor` (command text) + `UStartRaceFormWidgetY2::OnPlayerJoinedGame` (confirmed join); a lobby-phase marble sweep reports bots with `via_chat: false`, `command: null` |
+| `countdown` | `phase`, `seconds_left` | every second of a countdown | `phase: "start"` = pre-race countdown after the host presses Start (`UStartRaceWidgetY2::OnStartMatchTimerUpdated`); `phase: "race_end"` = the force-race-end timer after the first finisher (`AMarbleRaceHUDY2::OnForceRaceEndTimerUpdated`) |
+| `marble_damaged` | `damage`, `health`, `health_before`, `max_health`, `attacker` | every hit (royale) | `AMarbleRaceGameMode::OnMarbleTookAnyDamage` |
+| `marble_finished` | `position`, `winner` | a marble crosses the finish | the existing `OnMarbleFinishedRace` hook |
+| `marble_eliminated` | `killer`, `elimination_order` | a marble dies | the existing `OnMarbleEliminated` hook |
+| `marble_resurrected` | `detected_by` (`respawn_hook` or `damage`) | an eliminated royale marble comes back | the existing `AMarbleRoyaleGameMode::RespawnMarble` hook (new pawn read from the call's return slot); backup: an "eliminated" player's **new** pawn taking damage ≥ 2 s after the death. Reported once per resurrection |
+| `grand_prix_finished` | `races`, `standings[]` (`position`, `name`, `display_name`, `points`, `wins`, `eliminations`, `damage`) | the Grand Prix final results table appears | `UGrandPrixFinalResultsWidget::BP_Setup` (a BlueprintImplementableEvent, caught with a ProcessEvent post-callback matched by FName) |
+
+Notes, all from live verification:
+
+- **Health is read before the hit is applied.** `health` is computed as
+  `trunc(health_before - damage)`, which is what the next reading always is
+  (77 − 5.23 → 71, 71 − 9.37 → 61). Damage is a float; health is an int.
+- **The start countdown only exists when the lobby has free slots.** With a full
+  lobby (e.g. 30/30 bots) the game greys out the countdown and Start begins the
+  match immediately, so no `countdown` events are sent.
+- **`race_end` keeps ticking after `results`**, because the game's own timer does.
+- **Grand Prix:** the podium level waits for **any key press** per winner; the
+  final table (and `grand_prix_finished`) appears after the last one.
+- `ignore` applies to `results` only, never to live events.
+- `SpawnViewer` and `OnViewerJoinGameRequestMessage` look like join hooks in the
+  SDK dump but **never fire**; don't use them.
+- **Resurrections:** verified by forcing `RespawnMarble` mid-royale (2 of 2
+  reported by the hook, placements correct: first out → revived → 9th). A
+  later death gets a new `marble_eliminated` with a later `elimination_order`.
+  One natural resurrection in testing was seen by neither hook, only by the
+  end-of-match safety net, so some revive path skips `RespawnMarble`. The
+  damage-based backup detector exists for that path. It produced no false
+  positives in a 100-marble royale, but no natural revive has hit it live yet.
+- **Post-hook return values live in `ctx.RESULT_DECL`**, not at the
+  `ReturnValue` offset of the param block: for Blueprint-originated calls UE4SS
+  builds that block without initialising the return slot, so it's stack
+  garbage. (Fixed in 3.23 for the respawn hooks, which read it from the param
+  block before and only worked through the PlayerState fallback.)
+
+### Crash safety
+
+The mod runs inside the game, so it's written to fail closed:
+
+- **The DLL is pinned** (`GET_MODULE_HANDLE_EX_FLAG_PIN`). UE4SS `FreeLibrary()`s
+  C++ mods at exit (and on hot reload), but sender threads, UFunction hooks and
+  the ProcessEvent callback outlive the mod instance. Pinned, they never run
+  unmapped code. Hook-registration flags are process-static so a re-created
+  instance doesn't register hooks twice.
+- **SEH guards only catch what is survivable**: access violations, guard-page /
+  in-page faults from reading stale game memory, and C++ exceptions
+  (`MikSehFilter`). Stack overflows and anything else propagate.
+- No game memory is read while one of the mod's mutexes is held, so a caught
+  fault can't leave a lock held. The trace mutex is `try_lock`-only.
+- Struct/array params are type-checked with `CastField` before use, hand-built
+  ProcessEvent param structs check `GetParmsSize()` first, and a missing param
+  offset disables a handler instead of guessing.
+- Match end is latched before standings are built, so a fault there can't
+  retry every tick.
+- Everything that grows is bounded: sender queues (4000/target), pending chat
+  commands (4000, pruned after 10 min), per-match state (reset on map change).
+- Sender threads drop their queue on stop. Tested: quitting the game normally
+  while a request was hanging on a black-holed target exited in 2 s with no
+  crash report; memory, threads and handles stayed flat through a 100-marble
+  royale streaming to three targets (one live, one black-holed, one refused).
+
+Transport: each target has its own sender thread and FIFO queue (max 4000), so
+events arrive in order, `results` lands after the match's last finish/elimination
+event, and a slow or dead endpoint only backs up its own queue. When a queue is
+full, `marble_damaged` / `countdown` events are dropped first. WinHTTP keeps the
+connection alive between requests. Event POST failures are logged at most once
+per 5 s per target; ready/results outcomes are always logged as before. A
+30-marble royale produces roughly 300–450 `marble_damaged` events.
+
+### Finding hooks after a game update: `trace_functions=1`
+
+Add `trace_functions=1` to config.txt and UE4SS.log gets one line per distinct
+UFunction the first time it goes through ProcessEvent on each map (`[MikMarble]
+trace Owner.Function (on ContextClass)`), plus a repeat line (≤ 2/s) for anything
+named like a timer. Play the situation you're interested in and read what
+appeared around that timestamp. That's how the countdown and Grand Prix hooks
+were found. It's off by default. When off, it costs one atomic load per ProcessEvent.
 
 ---
 
@@ -338,6 +449,41 @@ ignore=DrDraxi, SomeModerator
 ignore=AnotherName
 ```
 
+### Targets and feature routing (3.23+)
+
+`host`/`port`/`path` define the target with id **`default`**. More targets get
+an id with `target.<id>=<url>` (`http://` or `https://`, optional port and base
+path). Then each feature is routed to target ids:
+
+```ini
+target.overlay=http://192.168.1.20:8080/marbles
+target.bot=https://example.com/hooks
+
+results=default              # legacy results; this is the default when omitted
+player_joined=overlay,bot    # live events are OFF unless listed
+marble_eliminated=overlay
+countdown=overlay
+all_events=bot               # shortcut: every live event to these ids
+```
+
+- Feature keys: `results`, `map_entered`, `player_joined`, `marble_finished`,
+  `marble_eliminated`, `marble_resurrected`, `marble_damaged`, `countdown`, `grand_prix_finished`,
+  `all_events`. Values are comma-separated ids; `none`/`off` routes nowhere
+  (`results=none` turns legacy results off). Repeating a key appends ids.
+- Every target that receives anything gets the `/ready` handshake, which since
+  3.23 also says what that target will receive:
+  `{"mod": "MikMarbleMod", "version": "3.23", "results": true, "events": ["player_joined", ...]}`.
+- A target nothing is routed to is unused. Unknown ids, duplicate ids and bad
+  URLs are reported as `[MikMarble] config: ...` warnings at startup. The
+  resolved routing is always logged:
+
+  ```
+  [MikMarble] target: default = 127.0.0.1:5000/mod (results on; events: none)
+  [MikMarble] target: overlay = 192.168.1.20:8080/marbles (results off; events: countdown,marble_eliminated,player_joined)
+  ```
+- A blank `host=` removes the `default` target entirely.
+- `trace_functions=1` turns on discovery logging (see "Live events").
+
 ### `ignore` — omitting players from results
 
 Optional and off by default. Comma-separated display names; the key may be
@@ -381,17 +527,35 @@ Point `path` at your real backend to use it for real.
 
 ```bash
 pip install -r server/requirements.txt
-python server/server.py            # listens on 0.0.0.0:5000
+python server/server.py            # listens on 0.0.0.0:5000, base path /mod
 ```
 
-Endpoints:
+Endpoints (under `--base`, default `/mod`):
 
-- `POST /mod/ready`   → `200` handshake. Logs the reporting build, e.g.
-  `Ready: MikMarbleMod v3.22`, and echoes the version back in the response.
-- `POST /mod/results` → validates the payload and prints the standings, the
+- `POST {base}/ready`   → `200` handshake. Logs the reporting build, e.g.
+  `Ready: MikMarbleMod v3.23`, plus (3.23+) which results/events this target
+  will get, and echoes the version back.
+- `POST {base}/results` → validates the payload and prints the standings, the
   winner, and (for royales) the loser; echoes the parsed result back as JSON.
+- `POST {base}/event`   → prints one readable line per live event, e.g.
+  `[player_joined      ] DrDraxi joined with '!play 7'`.
 
-It listens on all interfaces so a game on another machine/VM can reach it.
+Flags: `--port`, `--base`, `--log FILE` (append every request as JSON lines,
+handy for checking a test run), `--quiet marble_damaged,countdown` (count but
+don't print noisy events), `--verbose` (raw headers/bodies for results).
+
+To exercise multiple targets, run one copy per target:
+
+```bash
+python server/server.py --port 5000 --log a.jsonl --quiet marble_damaged
+MSYS_NO_PATHCONV=1 python server/server.py --port 5001 --base /second --log b.jsonl
+```
+
+(`MSYS_NO_PATHCONV=1` only matters in Git Bash, which otherwise rewrites
+`/second` into a Windows path.) It listens on all interfaces so a game on
+another machine/VM can reach it. The server no longer runs Flask's debug
+reloader. Its leftover child process kept port 5000 open after the parent was
+killed, so two servers ended up sharing the port.
 
 ---
 
@@ -459,8 +623,8 @@ line, the debug panel and the `/ready` body all derive from them:
 
 | line | what |
 |---|---|
-| ~85 | `kModVersion = "3.22";`: narrow copy for the JSON handshake and ImGui |
-| ~1340 | `ModVersion = STR("3.22");`: the log line users verify |
+| ~103 | `kModVersion = "3.23";`: narrow copy for the JSON handshake and ImGui |
+| ~2450 | `ModVersion = STR("3.23");`: the log line users verify |
 
 Also bump the version in `dist/INSTALL.txt`. To cut a release, build, then
 refresh `dist/ue4ss/Mods/MikMarbleMod/dlls/main.dll` with the new
